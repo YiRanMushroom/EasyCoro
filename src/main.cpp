@@ -28,20 +28,25 @@ EasyCoro::SimpleAwaitable<size_t> Sleep(int time) {
     co_return time;
 }
 
+EasyCoro::SimpleAwaitable<size_t> Sleep(int time, auto &&... rest) {
+    size_t result = co_await Sleep(time);
+    result += co_await Sleep(std::forward<decltype(rest)>(rest)...);
+    co_return result;
+}
+
 int main() {
     EasyCoro::MultiThreadedExecutionContext context(32);
     try {
-        context.BlockOn(EasyCoro::AllOf(
+        context.BlockOn(EasyCoro::AnyOf(
             NestedCoroutine(ExampleCoroutine(), ExampleCoroutine()),
             Sleep(2),
-            Sleep(3),
-            Sleep(1)
+            Sleep(3, 6, 6, 4),
+            Sleep(1, 3, 4, 5)
         ));
     } catch (const std::exception &ex) {
         std::cerr << "Caught exception: " << ex.what() << std::endl;
     }
 
-    std::this_thread::sleep_for(std::chrono::seconds(1));
 
     std::cout << "Main function completed." << std::endl;
 }

@@ -334,6 +334,13 @@ namespace EasyCoro {
             assert(handle.done());
             return await_resume();
         }
+
+        std::optional<Ret> TryGetResult() {
+            if (std::holds_alternative<Ret>(GetMyHandle().promise().Result)) {
+                return std::get<Ret>(GetMyHandle().promise().Result);
+            }
+            return std::nullopt;
+        }
     };
 
     auto MultiThreadedExecutionContext::BlockOn(auto &&awaitable) {
@@ -395,5 +402,34 @@ namespace EasyCoro {
         co_await std::suspend_always{};
 
         co_return std::make_tuple(awaitables.GetResult()...);
+    }
+
+    export template<std::derived_from<AwaitableBase>... Awaitables>
+    SimpleAwaitable<std::tuple<std::optional<typename Awaitables::ReturnType>...>> AnyOf(Awaitables... awaitables) {
+        auto parentHandle = std::coroutine_handle<SimpleAwaitable<void>::PromiseType>::from_address(
+    (co_await AwaitToGetThisHandle{}).address()).promise().Self;
+
+        std::shared_ptr<std::function<void()>> onChildSuspend = std::make_shared<std::function<
+            void()>>(
+
+            [Invoked = std::make_shared<std::atomic_bool>(false), parentHandle]() mutable {
+                bool expected = false;
+                if (Invoked->compare_exchange_strong(expected, true)) {
+                    GetCurrentExecutionContext().Schedule(parentHandle);
+                }
+            }
+        );
+
+        ((awaitables.SetOnFinished([onChildSuspend]() mutable {
+            (*onChildSuspend)();
+        })), ...);
+
+        (GetCurrentExecutionContext().Schedule(
+            std::coroutine_handle<SimpleAwaitable<void>::PromiseType>::from_address(
+                awaitables.GetHandle().address()).promise().Self), ...);
+
+        co_await std::suspend_always{};
+
+        co_return std::make_tuple(awaitables.TryGetResult()...);
     }
 }
