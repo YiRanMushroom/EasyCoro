@@ -6,6 +6,8 @@ import <cassert>;
 import <stddef.h>;
 
 namespace EasyCoro {
+    export class MultiThreadedExecutionContext;
+
     export class AwaitableBase {
     public:
         virtual ~AwaitableBase() = default;
@@ -21,28 +23,22 @@ namespace EasyCoro {
     public:
         virtual ~ExecutionContext() = default;
 
-        virtual void Schedule(std::coroutine_handle<> awaitable) = 0;
+        virtual void Schedule(std::shared_ptr<void> handle) = 0;
     };
 
-    export thread_local ExecutionContext *CurrentExecutionContext = nullptr;
-
-    export ExecutionContext &GetCurrentExecutionContext() {
-        if (!CurrentExecutionContext) {
-            throw std::runtime_error("No current execution context set");
-        }
-
-        return *CurrentExecutionContext;
-    }
+    export thread_local MultiThreadedExecutionContext *CurrentExecutionContext = nullptr;
 
     export template<typename Ret>
     class AwaitableBaseRet : public AwaitableBase {
     public:
+        using ReturnType = Ret;
+
         ~AwaitableBaseRet() override = default;
 
         [[nodiscard]] virtual Ret GetResult() = 0;
     };
 
-    export class MultiThreadedExecutionContext : public ExecutionContext {
+    class MultiThreadedExecutionContext : public ExecutionContext {
     public:
         MultiThreadedExecutionContext(size_t threadCount = std::jthread::hardware_concurrency() * 2)
             : m_ThreadPool(threadCount, [this] {
@@ -52,9 +48,14 @@ namespace EasyCoro {
             }) {}
 
     public:
-        void Schedule(std::coroutine_handle<> handle) override {
-            m_ThreadPool.Enqueue([handle] {
-                handle.resume();
+        void Schedule(std::shared_ptr<void> handle) override {
+            m_ThreadPool.Enqueue([weak = std::weak_ptr(handle)] {
+                if (auto shared = weak.lock()) {
+                    std::coroutine_handle<> coroHandle = std::coroutine_handle<>::from_address(shared.get());
+                    if (!coroHandle.done()) {
+                        coroHandle.resume();
+                    }
+                }
             });
         }
 
@@ -62,45 +63,37 @@ namespace EasyCoro {
             m_ThreadPool.WaitAllTaskToFinish();
         }
 
-        auto BlockOn(auto &&awaitable) {
-            auto handle = awaitable.GetHandle();
-            if (!handle.done()) {
-                Schedule(handle);
-            }
-            while (!handle.done()) {
-                WaitAllTaskToFinish();
-                std::this_thread::sleep_for(std::chrono::milliseconds(25));
-            }
-            return awaitable.GetResult();
-        }
+        auto BlockOn(auto &&awaitable);
 
     private:
         ThreadPool m_ThreadPool{};
     };
 
+    export MultiThreadedExecutionContext &GetCurrentExecutionContext() {
+        if (!CurrentExecutionContext) {
+            throw std::runtime_error("No current execution context set");
+        }
+
+        return *CurrentExecutionContext;
+    }
+
+
     export template<typename Ret>
     class SimpleAwaitable;
-
-
 
     export template<>
     class SimpleAwaitable<void> : public AwaitableBaseRet<void> {
     public:
         struct PromiseType {
-            std::atomic_bool IsCancelled = false;
-            std::function<std::optional<std::coroutine_handle<>>()> ParentHandleCallback = [] {
-                return std::nullopt;
-            };
+            std::shared_ptr<void> Self;
 
-            std::mutex ChildrenMutex{};
-            std::function<void()> CancelChildren = [] {};
+            std::atomic_bool IsCancelled = false;
+            std::function<void()> OnFinished = nullptr;
 
             std::variant<std::monostate, std::exception_ptr> Result{std::monostate{}};
 
             void Cancel() {
                 IsCancelled = true;
-                std::lock_guard lock(ChildrenMutex);
-                CancelChildren();
             }
 
             auto get_return_object() {
@@ -112,9 +105,8 @@ namespace EasyCoro {
 
             void return_void() {
                 Result = std::monostate{};
-                if (auto parent = ParentHandleCallback()) {
-                    GetCurrentExecutionContext().Schedule(*parent);
-                }
+                if (OnFinished)
+                    OnFinished();
             }
 
             void unhandled_exception() { Result = std::current_exception(); }
@@ -126,7 +118,16 @@ namespace EasyCoro {
 
     public:
         SimpleAwaitable(std::coroutine_handle<PromiseType> handle) : m_MyHandle(
-            handle) {}
+            handle) {
+            handle.promise().Self =
+                    std::shared_ptr<void>(handle.address(),
+                                          [](void *ptr) {
+                                              if (ptr) {
+                                                  std::coroutine_handle<PromiseType>::from_address(ptr).
+                                                          destroy();
+                                              }
+                                          });
+        }
 
         SimpleAwaitable(const SimpleAwaitable &) = delete;
 
@@ -137,13 +138,7 @@ namespace EasyCoro {
         SimpleAwaitable &operator=(const SimpleAwaitable &) = delete;
 
         SimpleAwaitable &operator=(SimpleAwaitable &&other) noexcept {
-            if (this != &other) {
-                if (m_MyHandle) {
-                    m_MyHandle.destroy();
-                }
-                m_MyHandle = other.m_MyHandle;
-                other.m_MyHandle = nullptr;
-            }
+            std::swap(m_MyHandle, other.m_MyHandle);
             return *this;
         }
 
@@ -153,12 +148,6 @@ namespace EasyCoro {
         }
 
     public:
-        ~SimpleAwaitable() override {
-            if (m_MyHandle) {
-                m_MyHandle.destroy();
-            }
-        }
-
         [[nodiscard]] std::coroutine_handle<> GetHandle() const override {
             return GetMyHandle();
         }
@@ -168,32 +157,28 @@ namespace EasyCoro {
             return false;
         }
 
+        std::function<void()> OnFinishedCallback = nullptr;
+
         void await_suspend(std::coroutine_handle<> parentHandle) {
-            GetMyHandle().promise().ParentHandleCallback = [parentHandle
-                    ]() mutable -> std::optional<std::coroutine_handle<>> {
-                        if (auto copied = parentHandle) {
-                            parentHandle = nullptr;
-                            return copied;
-                        }
-                        return std::nullopt;
-                    };
-
-            // Unsafe, probably no better way, rely on undefined behavior
-            {
-                auto castedParent = std::coroutine_handle<PromiseType>::from_address(
-                    parentHandle.address());
-                auto &parentPromise = castedParent.promise();
-                std::lock_guard lock(parentPromise.ChildrenMutex);
-                parentPromise.CancelChildren = [this]() {
-                    this->Cancel();
-                };
+            GetCurrentExecutionContext().Schedule(GetMyHandle().promise().Self);
+            if (!GetMyHandle().promise().OnFinished) {
+                GetMyHandle().promise().OnFinished = [parentHandle = std::weak_ptr(
+                            std::coroutine_handle<PromiseType>::from_address(
+                                parentHandle.address()).promise().Self)]() mutable {
+                            if (auto copied = parentHandle.lock()) {
+                                parentHandle.reset();
+                                GetCurrentExecutionContext().Schedule(copied);
+                            }
+                        };
             }
-
-            GetCurrentExecutionContext().Schedule(GetMyHandle());
         }
 
         void Cancel() override {
             GetMyHandle().promise().Cancel();
+        }
+
+        void SetOnFinished(auto &&callback) {
+            GetMyHandle().promise().OnFinished = std::forward<decltype(callback)>(callback);
         }
 
         void await_resume() {
@@ -224,21 +209,18 @@ namespace EasyCoro {
     template<typename Ret>
     class SimpleAwaitable : public AwaitableBaseRet<Ret> {
     public:
-        struct PromiseType {
-            std::atomic_bool IsCancelled = false;
-            std::function<std::optional<std::coroutine_handle<>>()> ParentHandleCallback = [] {
-                return std::nullopt;
-            };
+        using ReturnType = Ret;
 
-            std::mutex ChildrenMutex{};
-            std::function<void()> CancelChildren = [] {};
+        struct PromiseType {
+            std::shared_ptr<void> Self;
+
+            std::atomic_bool IsCancelled = false;
+            std::function<void()> OnFinished = nullptr;
 
             std::variant<std::monostate, Ret, std::exception_ptr> Result{std::monostate{}};
 
             void Cancel() {
                 IsCancelled = true;
-                std::lock_guard lock(ChildrenMutex);
-                CancelChildren();
             }
 
             auto get_return_object() {
@@ -250,8 +232,8 @@ namespace EasyCoro {
 
             void return_value(Ret value) {
                 Result = std::move(value);
-                if (auto parent = ParentHandleCallback()) {
-                    GetCurrentExecutionContext().Schedule(*parent);
+                if (OnFinished) {
+                    OnFinished();
                 }
             }
 
@@ -260,17 +242,20 @@ namespace EasyCoro {
 
         using promise_type = PromiseType;
 
-        static_assert(offsetof(PromiseType, ChildrenMutex) == offsetof(SimpleAwaitable<void>::PromiseType, ChildrenMutex),
-              "ChildrenMutex must be at the same offset in both PromiseType specializations");
-
-        static_assert(offsetof(PromiseType, CancelChildren) == offsetof(SimpleAwaitable<void>::PromiseType, CancelChildren),
-                      "CancelChildren must be at the same offset in both PromiseType specializations");
-
         std::coroutine_handle<PromiseType> m_MyHandle;
 
     public:
         SimpleAwaitable(std::coroutine_handle<PromiseType> handle) : m_MyHandle(
-            handle) {}
+            handle) {
+            handle.promise().Self =
+                    std::shared_ptr<void>(handle.address(),
+                                          [](void *ptr) {
+                                              if (ptr) {
+                                                  std::coroutine_handle<PromiseType>::from_address(ptr).
+                                                          destroy();
+                                              }
+                                          });
+        }
 
         SimpleAwaitable(const SimpleAwaitable &) = delete;
 
@@ -281,14 +266,7 @@ namespace EasyCoro {
         SimpleAwaitable &operator=(const SimpleAwaitable &) = delete;
 
         SimpleAwaitable &operator=(SimpleAwaitable &&other) noexcept {
-            if (this != &other) {
-                if (m_MyHandle) {
-                    m_MyHandle.destroy();
-                }
-                m_MyHandle = other.m_MyHandle;
-                other.m_MyHandle = nullptr;
-            }
-            return *this;
+            std::swap(m_MyHandle, other.m_MyHandle);
         }
 
     protected:
@@ -297,11 +275,7 @@ namespace EasyCoro {
         }
 
     public:
-        ~SimpleAwaitable() override {
-            if (m_MyHandle) {
-                m_MyHandle.destroy();
-            }
-        }
+        ~SimpleAwaitable() override {}
 
         [[nodiscard]] std::coroutine_handle<> GetHandle() const override {
             return GetMyHandle();
@@ -313,31 +287,26 @@ namespace EasyCoro {
         }
 
         void await_suspend(std::coroutine_handle<> parentHandle) {
-            GetMyHandle().promise().ParentHandleCallback = [parentHandle
-                    ]() mutable -> std::optional<std::coroutine_handle<>> {
-                        if (auto copied = parentHandle) {
-                            parentHandle = nullptr;
-                            return copied;
-                        }
-                        return std::nullopt;
-                    };
-
-            // Unsafe, temporary change int
-            {
-                auto castedParent = std::coroutine_handle<SimpleAwaitable<void>::PromiseType>::from_address(
-                    parentHandle.address());
-                auto &parentPromise = castedParent.promise();
-                std::lock_guard lock(parentPromise.ChildrenMutex);
-                parentPromise.CancelChildren = [this]() {
-                    this->Cancel();
-                };
+            GetCurrentExecutionContext().Schedule(GetMyHandle().promise().Self);
+            if (!GetMyHandle().promise().OnFinished) {
+                GetMyHandle().promise().OnFinished = [parentHandle = std::weak_ptr(
+                                std::coroutine_handle<PromiseType>::from_address(
+                                    parentHandle.address()).promise().Self)
+                        ]() mutable {
+                            if (auto copied = parentHandle.lock()) {
+                                parentHandle.reset();
+                                GetCurrentExecutionContext().Schedule(copied);
+                            }
+                        };
             }
-
-            GetCurrentExecutionContext().Schedule(GetMyHandle());
         }
 
         void Cancel() override {
             GetMyHandle().promise().Cancel();
+        }
+
+        void SetOnFinished(auto &&callback) {
+            GetMyHandle().promise().OnFinished = std::forward<decltype(callback)>(callback);
         }
 
         Ret await_resume() {
@@ -366,4 +335,65 @@ namespace EasyCoro {
             return await_resume();
         }
     };
+
+    auto MultiThreadedExecutionContext::BlockOn(auto &&awaitable) {
+        auto handle = awaitable.GetHandle();
+        std::shared_ptr handlePtr = std::coroutine_handle<SimpleAwaitable<
+            void>::PromiseType>::from_address(handle.address()).promise().Self;
+        if (!handle.done()) {
+            Schedule(handlePtr);
+        }
+        while (!handle.done()) {
+            WaitAllTaskToFinish();
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        return awaitable.GetResult();
+    }
+
+    struct AwaitToGetThisHandle {
+        std::coroutine_handle<> parentHandle;
+
+        bool await_ready() const noexcept { return false; }
+
+        void await_suspend(std::coroutine_handle<> handle) {
+            parentHandle = handle;
+            GetCurrentExecutionContext().Schedule(
+                std::coroutine_handle<SimpleAwaitable<void>::PromiseType>::from_address(
+                    handle.address()).promise().Self);
+        }
+
+        std::coroutine_handle<> await_resume() const noexcept {
+            return parentHandle;
+        }
+    };
+
+    export template<std::derived_from<AwaitableBase>... Awaitables>
+    SimpleAwaitable<std::tuple<typename Awaitables::ReturnType...>> AllOf(Awaitables... awaitables) {
+        auto parentHandle = std::coroutine_handle<SimpleAwaitable<void>::PromiseType>::from_address(
+            (co_await AwaitToGetThisHandle{}).address()).promise().Self;
+
+        std::shared_ptr<std::function<void()>> onChildSuspend = std::make_shared<std::function<
+            void()>>(
+
+            [remaining = std::make_shared<std::atomic_size_t>(sizeof...(Awaitables)), parentHandle]() mutable {
+                if (--*remaining == 0) {
+                    GetCurrentExecutionContext().Schedule(parentHandle);
+                } else {
+                    std::cout << *remaining << " awaitables remaining..." << std::endl;
+                }
+            }
+        );
+
+        ((awaitables.SetOnFinished([onChildSuspend]() mutable {
+            (*onChildSuspend)();
+        })), ...);
+
+        (GetCurrentExecutionContext().Schedule(
+            std::coroutine_handle<SimpleAwaitable<void>::PromiseType>::from_address(
+                awaitables.GetHandle().address()).promise().Self), ...);
+
+        co_await std::suspend_always{};
+
+        co_return std::make_tuple(awaitables.GetResult()...);
+    }
 }
