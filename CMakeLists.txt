@@ -3,4 +3,25 @@ project(EasyCoro)
 
 set(CMAKE_CXX_STANDARD 23)
 
-add_library(EasyCoro STATIC library.cpp)
+add_executable(EasyCoro src/main.cpp)
+
+target_sources(EasyCoro PUBLIC
+        FILE_SET top_module
+        TYPE CXX_MODULES
+        FILES
+        src/EasyCoro.ixx)
+
+file(GLOB_RECURSE interface_modules src/interface/*.ixx)
+target_sources(EasyCoro PUBLIC
+        FILE_SET interface_modules
+        TYPE CXX_MODULES
+        FILES
+        ${interface_modules})
+
+file(GLOB_RECURSE source_files src/*.cpp)
+target_sources(EasyCoro PRIVATE ${source_files})
+
+SET(BUILD_TESTING OFF)
+
+add_subdirectory(vendor/libcoro)
+target_link_libraries(EasyCoro PUBLIC libcoro)

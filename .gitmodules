@@ -1,4 +1,3 @@
-[submodule "vendor/boost"]
-	path = vendor/boost
-	url = https://github.com/boostorg/boost
-	branch = master
+[submodule "vendor/libcoro"]
+	path = vendor/libcoro
+	url = https://github.com/jbaldwin/libcoro
