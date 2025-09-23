@@ -90,6 +90,7 @@ namespace EasyCoro {
             std::atomic_bool IsCancelled = false;
             std::function<void()> OnFinished = nullptr;
 
+            std::mutex ResultProtectMutex;
             std::variant<std::monostate, std::exception_ptr> Result{std::monostate{}};
 
             void Cancel() {
@@ -104,7 +105,12 @@ namespace EasyCoro {
             constexpr static std::suspend_always final_suspend() noexcept { return {}; }
 
             void return_void() {
-                Result = std::monostate{};
+                // Protect
+                {
+                    std::scoped_lock lock(ResultProtectMutex);
+                    Result = std::monostate{};
+                }
+
                 if (OnFinished)
                     OnFinished();
             }
@@ -160,7 +166,6 @@ namespace EasyCoro {
         std::function<void()> OnFinishedCallback = nullptr;
 
         void await_suspend(std::coroutine_handle<> parentHandle) {
-            GetCurrentExecutionContext().Schedule(GetMyHandle().promise().Self);
             if (!GetMyHandle().promise().OnFinished) {
                 GetMyHandle().promise().OnFinished = [parentHandle = std::weak_ptr(
                             std::coroutine_handle<PromiseType>::from_address(
@@ -171,6 +176,7 @@ namespace EasyCoro {
                             }
                         };
             }
+            GetCurrentExecutionContext().Schedule(GetMyHandle().promise().Self);
         }
 
         void Cancel() override {
@@ -217,6 +223,7 @@ namespace EasyCoro {
             std::atomic_bool IsCancelled = false;
             std::function<void()> OnFinished = nullptr;
 
+            std::mutex ResultProtectMutex;
             std::variant<std::monostate, Ret, std::exception_ptr> Result{std::monostate{}};
 
             void Cancel() {
@@ -231,7 +238,11 @@ namespace EasyCoro {
             constexpr static std::suspend_always final_suspend() noexcept { return {}; }
 
             void return_value(Ret value) {
-                Result = std::move(value);
+                // Protect
+                {
+                    std::scoped_lock lock(ResultProtectMutex);
+                    Result = std::move(value);
+                }
                 if (OnFinished) {
                     OnFinished();
                 }
@@ -287,7 +298,6 @@ namespace EasyCoro {
         }
 
         void await_suspend(std::coroutine_handle<> parentHandle) {
-            GetCurrentExecutionContext().Schedule(GetMyHandle().promise().Self);
             if (!GetMyHandle().promise().OnFinished) {
                 GetMyHandle().promise().OnFinished = [parentHandle = std::weak_ptr(
                                 std::coroutine_handle<PromiseType>::from_address(
@@ -299,6 +309,7 @@ namespace EasyCoro {
                             }
                         };
             }
+            GetCurrentExecutionContext().Schedule(GetMyHandle().promise().Self);
         }
 
         void Cancel() override {
@@ -407,7 +418,7 @@ namespace EasyCoro {
     export template<std::derived_from<AwaitableBase>... Awaitables>
     SimpleAwaitable<std::tuple<std::optional<typename Awaitables::ReturnType>...>> AnyOf(Awaitables... awaitables) {
         auto parentHandle = std::coroutine_handle<SimpleAwaitable<void>::PromiseType>::from_address(
-    (co_await AwaitToGetThisHandle{}).address()).promise().Self;
+            (co_await AwaitToGetThisHandle{}).address()).promise().Self;
 
         std::shared_ptr<std::function<void()>> onChildSuspend = std::make_shared<std::function<
             void()>>(
