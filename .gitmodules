@@ -1,3 +1,0 @@
-[submodule "vendor/libcoro"]
-	path = vendor/libcoro
-	url = https://github.com/jbaldwin/libcoro

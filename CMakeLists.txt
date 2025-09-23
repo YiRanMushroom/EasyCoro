@@ -18,10 +18,12 @@ target_sources(EasyCoro PUBLIC
         FILES
         ${interface_modules})
 
+file(GLOB_RECURSE implementation_modules src/impl/*.ixx)
+target_sources(EasyCoro PRIVATE
+        FILE_SET implementation_modules
+        TYPE CXX_MODULES
+        FILES
+        ${implementation_modules})
+
 file(GLOB_RECURSE source_files src/*.cpp)
 target_sources(EasyCoro PRIVATE ${source_files})
-
-SET(BUILD_TESTING OFF)
-
-add_subdirectory(vendor/libcoro)
-target_link_libraries(EasyCoro PUBLIC libcoro)

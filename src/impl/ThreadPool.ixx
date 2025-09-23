@@ -3,7 +3,7 @@ export module EasyCoro.ThreadPool;
 import std;
 
 namespace EasyCoro {
-        export class IThreadPool {
+    export class IThreadPool {
     public:
         virtual ~IThreadPool() = default;
 
@@ -66,7 +66,8 @@ namespace EasyCoro {
         }
 
         template<typename OnStartUp, typename OnShutDown>
-        ThreadPool(size_t size = std::jthread::hardware_concurrency() * 2, OnStartUp &&onStartUp = {}, OnShutDown &&onShutDown = {}) {
+        ThreadPool(size_t size = std::jthread::hardware_concurrency() * 2, OnStartUp &&onStartUp = {},
+                   OnShutDown &&onShutDown = {}) {
             m_WorkerThreads.reserve(size);
             for (size_t i = 0; i < size; ++i) {
                 m_WorkerThreads.emplace_back([this, onStartUp, onShutDown] {
@@ -153,7 +154,7 @@ namespace EasyCoro {
         std::atomic_bool m_ShouldStop{false};
     };
 
-    export IThreadPool* GlobalThreadPool() {
+    export IThreadPool *GlobalThreadPool() {
         static ThreadPool pool{};
         return &pool;
     }

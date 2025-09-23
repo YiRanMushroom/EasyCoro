@@ -35,7 +35,7 @@ EasyCoro::SimpleAwaitable<size_t> Sleep(int time, auto &&... rest) {
 }
 
 int main() {
-    EasyCoro::MultiThreadedExecutionContext context(32);
+    EasyCoro::ExecutionContext context(32);
     try {
         context.BlockOn(EasyCoro::AnyOf(
             NestedCoroutine(ExampleCoroutine(), ExampleCoroutine()),
@@ -46,7 +46,6 @@ int main() {
     } catch (const std::exception &ex) {
         std::cerr << "Caught exception: " << ex.what() << std::endl;
     }
-
 
     std::cout << "Main function completed." << std::endl;
 }

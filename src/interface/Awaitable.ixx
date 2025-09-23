@@ -3,52 +3,25 @@ export module EasyCoro.Awaitable;
 import std;
 import EasyCoro.ThreadPool;
 import <cassert>;
-import <stddef.h>;
+import <cstddef>;
 
 namespace EasyCoro {
-    export class MultiThreadedExecutionContext;
+    export class ExecutionContext;
 
-    export class AwaitableBase {
+    export thread_local ExecutionContext *CurrentExecutionContext = nullptr;
+
+    class ExecutionContext {
     public:
-        virtual ~AwaitableBase() = default;
-
-        virtual void Cancel() = 0;
-
-        [[nodiscard]] virtual std::coroutine_handle<> GetHandle() const = 0;
-
-        [[nodiscard]] virtual bool IsCancelled() const = 0;
-    };
-
-    export class ExecutionContext {
-    public:
-        virtual ~ExecutionContext() = default;
-
-        virtual void Schedule(std::shared_ptr<void> handle) = 0;
-    };
-
-    export thread_local MultiThreadedExecutionContext *CurrentExecutionContext = nullptr;
-
-    export template<typename Ret>
-    class AwaitableBaseRet : public AwaitableBase {
-    public:
-        using ReturnType = Ret;
-
-        ~AwaitableBaseRet() override = default;
-
-        [[nodiscard]] virtual Ret GetResult() = 0;
-    };
-
-    class MultiThreadedExecutionContext : public ExecutionContext {
-    public:
-        MultiThreadedExecutionContext(size_t threadCount = std::jthread::hardware_concurrency() * 2)
+        ExecutionContext(size_t threadCount = std::jthread::hardware_concurrency() * 2)
             : m_ThreadPool(threadCount, [this] {
                 CurrentExecutionContext = this;
             }, [] {
                 CurrentExecutionContext = nullptr;
-            }) {}
+            }) {
+        }
 
     public:
-        void Schedule(std::shared_ptr<void> handle) override {
+        void Schedule(std::shared_ptr<void> handle) {
             m_ThreadPool.Enqueue([weak = std::weak_ptr(handle)] {
                 if (auto shared = weak.lock()) {
                     std::coroutine_handle<> coroHandle = std::coroutine_handle<>::from_address(shared.get());
@@ -69,7 +42,7 @@ namespace EasyCoro {
         ThreadPool m_ThreadPool{};
     };
 
-    export MultiThreadedExecutionContext &GetCurrentExecutionContext() {
+    export ExecutionContext &GetCurrentExecutionContext() {
         if (!CurrentExecutionContext) {
             throw std::runtime_error("No current execution context set");
         }
@@ -81,8 +54,31 @@ namespace EasyCoro {
     export template<typename Ret>
     class SimpleAwaitable;
 
+    template<typename TargetType = void>
+    std::coroutine_handle<typename SimpleAwaitable<TargetType>::PromiseType>
+    PointerToHandleCast(const std::shared_ptr<void>& ptr) {
+        assert(ptr);
+        return std::coroutine_handle<typename SimpleAwaitable<TargetType>::PromiseType>::from_address(
+            ptr.get());
+    }
+
+    template<typename Ret>
+    const std::shared_ptr<void>& HandleToPointerCast(
+        std::coroutine_handle<typename SimpleAwaitable<Ret>::PromiseType> handle) {
+        assert(handle);
+        return handle.promise().Self;
+    }
+
+    template<typename TargetType = void>
+    std::coroutine_handle<typename SimpleAwaitable<TargetType>::PromiseType>
+    HandleReinterpretCast(std::coroutine_handle<> handle) {
+        assert(handle);
+        return std::coroutine_handle<typename SimpleAwaitable<TargetType>::PromiseType>::from_address(
+            handle.address());
+    }
+
     export template<>
-    class SimpleAwaitable<void> : public AwaitableBaseRet<void> {
+    class SimpleAwaitable<void> {
     public:
         struct PromiseType {
             std::shared_ptr<void> Self;
@@ -154,7 +150,7 @@ namespace EasyCoro {
         }
 
     public:
-        [[nodiscard]] std::coroutine_handle<> GetHandle() const override {
+        [[nodiscard]] std::coroutine_handle<> GetHandle() const {
             return GetMyHandle();
         }
 
@@ -179,7 +175,7 @@ namespace EasyCoro {
             GetCurrentExecutionContext().Schedule(GetMyHandle().promise().Self);
         }
 
-        void Cancel() override {
+        void Cancel() {
             GetMyHandle().promise().Cancel();
         }
 
@@ -201,11 +197,11 @@ namespace EasyCoro {
             }
         }
 
-        bool IsCancelled() const override {
+        bool IsCancelled() const {
             return GetMyHandle().promise().IsCancelled;
         }
 
-        void GetResult() override {
+        void GetResult() {
             auto handle = GetMyHandle();
             assert(handle.done());
             await_resume();
@@ -213,7 +209,7 @@ namespace EasyCoro {
     };
 
     template<typename Ret>
-    class SimpleAwaitable : public AwaitableBaseRet<Ret> {
+    class SimpleAwaitable {
     public:
         using ReturnType = Ret;
 
@@ -286,9 +282,10 @@ namespace EasyCoro {
         }
 
     public:
-        ~SimpleAwaitable() override {}
+        ~SimpleAwaitable() {
+        }
 
-        [[nodiscard]] std::coroutine_handle<> GetHandle() const override {
+        [[nodiscard]] std::coroutine_handle<> GetHandle() const {
             return GetMyHandle();
         }
 
@@ -312,7 +309,7 @@ namespace EasyCoro {
             GetCurrentExecutionContext().Schedule(GetMyHandle().promise().Self);
         }
 
-        void Cancel() override {
+        void Cancel() {
             GetMyHandle().promise().Cancel();
         }
 
@@ -336,11 +333,11 @@ namespace EasyCoro {
             }
         }
 
-        bool IsCancelled() const override {
+        bool IsCancelled() const {
             return GetMyHandle().promise().IsCancelled;
         }
 
-        Ret GetResult() override {
+        Ret GetResult() {
             auto handle = GetMyHandle();
             assert(handle.done());
             return await_resume();
@@ -354,7 +351,7 @@ namespace EasyCoro {
         }
     };
 
-    auto MultiThreadedExecutionContext::BlockOn(auto &&awaitable) {
+    auto ExecutionContext::BlockOn(auto &&awaitable) {
         auto handle = awaitable.GetHandle();
         std::shared_ptr handlePtr = std::coroutine_handle<SimpleAwaitable<
             void>::PromiseType>::from_address(handle.address()).promise().Self;
@@ -385,7 +382,7 @@ namespace EasyCoro {
         }
     };
 
-    export template<std::derived_from<AwaitableBase>... Awaitables>
+    export template<typename... Awaitables>
     SimpleAwaitable<std::tuple<typename Awaitables::ReturnType...>> AllOf(Awaitables... awaitables) {
         auto parentHandle = std::coroutine_handle<SimpleAwaitable<void>::PromiseType>::from_address(
             (co_await AwaitToGetThisHandle{}).address()).promise().Self;
@@ -415,7 +412,7 @@ namespace EasyCoro {
         co_return std::make_tuple(awaitables.GetResult()...);
     }
 
-    export template<std::derived_from<AwaitableBase>... Awaitables>
+    export template<typename... Awaitables>
     SimpleAwaitable<std::tuple<std::optional<typename Awaitables::ReturnType>...>> AnyOf(Awaitables... awaitables) {
         auto parentHandle = std::coroutine_handle<SimpleAwaitable<void>::PromiseType>::from_address(
             (co_await AwaitToGetThisHandle{}).address()).promise().Self;
