@@ -1,0 +1,4 @@
+[submodule "vendor/boost"]
+	path = vendor/boost
+	url = https://github.com/boostorg/boost
+	branch = master
