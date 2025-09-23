@@ -3,13 +3,14 @@ export module EasyCoro.Awaitable;
 import std;
 import EasyCoro.ThreadPool;
 import <cassert>;
+import <stddef.h>;
 
 namespace EasyCoro {
     export class AwaitableBase {
     public:
         virtual ~AwaitableBase() = default;
 
-        virtual void OnCompleted() = 0;
+        virtual void Cancel() = 0;
 
         [[nodiscard]] virtual std::coroutine_handle<> GetHandle() const = 0;
 
@@ -78,14 +79,167 @@ namespace EasyCoro {
     };
 
     export template<typename Ret>
-    class SimpleAwaitable : public AwaitableBaseRet<Ret> {
+    class SimpleAwaitable;
+
+
+
+    export template<>
+    class SimpleAwaitable<void> : public AwaitableBaseRet<void> {
     public:
         struct PromiseType {
-            std::variant<std::monostate, Ret, std::exception_ptr> Result{std::monostate{}};
-            bool IsCancelled = false;
+            std::atomic_bool IsCancelled = false;
             std::function<std::optional<std::coroutine_handle<>>()> ParentHandleCallback = [] {
                 return std::nullopt;
             };
+
+            std::mutex ChildrenMutex{};
+            std::function<void()> CancelChildren = [] {};
+
+            std::variant<std::monostate, std::exception_ptr> Result{std::monostate{}};
+
+            void Cancel() {
+                IsCancelled = true;
+                std::lock_guard lock(ChildrenMutex);
+                CancelChildren();
+            }
+
+            auto get_return_object() {
+                return SimpleAwaitable{std::coroutine_handle<PromiseType>::from_promise(*this)};
+            }
+
+            constexpr static std::suspend_always initial_suspend() { return {}; }
+            constexpr static std::suspend_always final_suspend() noexcept { return {}; }
+
+            void return_void() {
+                Result = std::monostate{};
+                if (auto parent = ParentHandleCallback()) {
+                    GetCurrentExecutionContext().Schedule(*parent);
+                }
+            }
+
+            void unhandled_exception() { Result = std::current_exception(); }
+        };
+
+        using promise_type = PromiseType;
+
+        std::coroutine_handle<PromiseType> m_MyHandle;
+
+    public:
+        SimpleAwaitable(std::coroutine_handle<PromiseType> handle) : m_MyHandle(
+            handle) {}
+
+        SimpleAwaitable(const SimpleAwaitable &) = delete;
+
+        SimpleAwaitable(SimpleAwaitable &&other) noexcept : m_MyHandle(other.m_MyHandle) {
+            other.m_MyHandle = nullptr;
+        }
+
+        SimpleAwaitable &operator=(const SimpleAwaitable &) = delete;
+
+        SimpleAwaitable &operator=(SimpleAwaitable &&other) noexcept {
+            if (this != &other) {
+                if (m_MyHandle) {
+                    m_MyHandle.destroy();
+                }
+                m_MyHandle = other.m_MyHandle;
+                other.m_MyHandle = nullptr;
+            }
+            return *this;
+        }
+
+    protected:
+        std::coroutine_handle<PromiseType> GetMyHandle() const {
+            return m_MyHandle;
+        }
+
+    public:
+        ~SimpleAwaitable() override {
+            if (m_MyHandle) {
+                m_MyHandle.destroy();
+            }
+        }
+
+        [[nodiscard]] std::coroutine_handle<> GetHandle() const override {
+            return GetMyHandle();
+        }
+
+        // Awaitable interface
+        [[nodiscard]] bool await_ready() const noexcept {
+            return false;
+        }
+
+        void await_suspend(std::coroutine_handle<> parentHandle) {
+            GetMyHandle().promise().ParentHandleCallback = [parentHandle
+                    ]() mutable -> std::optional<std::coroutine_handle<>> {
+                        if (auto copied = parentHandle) {
+                            parentHandle = nullptr;
+                            return copied;
+                        }
+                        return std::nullopt;
+                    };
+
+            // Unsafe, probably no better way, rely on undefined behavior
+            {
+                auto castedParent = std::coroutine_handle<PromiseType>::from_address(
+                    parentHandle.address());
+                auto &parentPromise = castedParent.promise();
+                std::lock_guard lock(parentPromise.ChildrenMutex);
+                parentPromise.CancelChildren = [this]() {
+                    this->Cancel();
+                };
+            }
+
+            GetCurrentExecutionContext().Schedule(GetMyHandle());
+        }
+
+        void Cancel() override {
+            GetMyHandle().promise().Cancel();
+        }
+
+        void await_resume() {
+            auto handle = GetMyHandle();
+
+            auto &variant = handle.promise().Result;
+            switch (variant.index()) {
+                case 0:
+                    return;
+                case 1:
+                    std::rethrow_exception(std::get<std::exception_ptr>(variant));
+                default:
+                    throw std::runtime_error("Invalid state in coroutine result");
+            }
+        }
+
+        bool IsCancelled() const override {
+            return GetMyHandle().promise().IsCancelled;
+        }
+
+        void GetResult() override {
+            auto handle = GetMyHandle();
+            assert(handle.done());
+            await_resume();
+        }
+    };
+
+    template<typename Ret>
+    class SimpleAwaitable : public AwaitableBaseRet<Ret> {
+    public:
+        struct PromiseType {
+            std::atomic_bool IsCancelled = false;
+            std::function<std::optional<std::coroutine_handle<>>()> ParentHandleCallback = [] {
+                return std::nullopt;
+            };
+
+            std::mutex ChildrenMutex{};
+            std::function<void()> CancelChildren = [] {};
+
+            std::variant<std::monostate, Ret, std::exception_ptr> Result{std::monostate{}};
+
+            void Cancel() {
+                IsCancelled = true;
+                std::lock_guard lock(ChildrenMutex);
+                CancelChildren();
+            }
 
             auto get_return_object() {
                 return SimpleAwaitable{std::coroutine_handle<PromiseType>::from_promise(*this)};
@@ -106,22 +260,48 @@ namespace EasyCoro {
 
         using promise_type = PromiseType;
 
-        std::shared_ptr<void> m_MyHandle;
+        static_assert(offsetof(PromiseType, ChildrenMutex) == offsetof(SimpleAwaitable<void>::PromiseType, ChildrenMutex),
+              "ChildrenMutex must be at the same offset in both PromiseType specializations");
+
+        static_assert(offsetof(PromiseType, CancelChildren) == offsetof(SimpleAwaitable<void>::PromiseType, CancelChildren),
+                      "CancelChildren must be at the same offset in both PromiseType specializations");
+
+        std::coroutine_handle<PromiseType> m_MyHandle;
 
     public:
         SimpleAwaitable(std::coroutine_handle<PromiseType> handle) : m_MyHandle(
-            std::shared_ptr<void>(handle.address(), [](void *ptr) {
-                std::coroutine_handle<PromiseType>::from_address(ptr).destroy();
-            })) {
+            handle) {}
+
+        SimpleAwaitable(const SimpleAwaitable &) = delete;
+
+        SimpleAwaitable(SimpleAwaitable &&other) noexcept : m_MyHandle(other.m_MyHandle) {
+            other.m_MyHandle = nullptr;
+        }
+
+        SimpleAwaitable &operator=(const SimpleAwaitable &) = delete;
+
+        SimpleAwaitable &operator=(SimpleAwaitable &&other) noexcept {
+            if (this != &other) {
+                if (m_MyHandle) {
+                    m_MyHandle.destroy();
+                }
+                m_MyHandle = other.m_MyHandle;
+                other.m_MyHandle = nullptr;
+            }
+            return *this;
         }
 
     protected:
         std::coroutine_handle<PromiseType> GetMyHandle() const {
-            return std::coroutine_handle<PromiseType>::from_address(m_MyHandle.get());
+            return m_MyHandle;
         }
 
     public:
-        ~SimpleAwaitable() override {}
+        ~SimpleAwaitable() override {
+            if (m_MyHandle) {
+                m_MyHandle.destroy();
+            }
+        }
 
         [[nodiscard]] std::coroutine_handle<> GetHandle() const override {
             return GetMyHandle();
@@ -141,7 +321,23 @@ namespace EasyCoro {
                         }
                         return std::nullopt;
                     };
+
+            // Unsafe, temporary change int
+            {
+                auto castedParent = std::coroutine_handle<SimpleAwaitable<void>::PromiseType>::from_address(
+                    parentHandle.address());
+                auto &parentPromise = castedParent.promise();
+                std::lock_guard lock(parentPromise.ChildrenMutex);
+                parentPromise.CancelChildren = [this]() {
+                    this->Cancel();
+                };
+            }
+
             GetCurrentExecutionContext().Schedule(GetMyHandle());
+        }
+
+        void Cancel() override {
+            GetMyHandle().promise().Cancel();
         }
 
         Ret await_resume() {
@@ -159,8 +355,6 @@ namespace EasyCoro {
                     throw std::runtime_error("Invalid state in coroutine result");
             }
         }
-
-        void OnCompleted() override {}
 
         bool IsCancelled() const override {
             return GetMyHandle().promise().IsCancelled;
