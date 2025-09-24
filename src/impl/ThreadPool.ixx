@@ -124,8 +124,6 @@ namespace EasyCoro {
         }
 
         void DetachAll() {
-            m_ShouldStop = true;
-            m_Condition.notify_all();
             for (auto &thread: m_WorkerThreads) {
                 if (thread.joinable()) {
                     thread.detach();

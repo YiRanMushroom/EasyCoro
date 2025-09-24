@@ -87,7 +87,7 @@ int main() {
 
     try {
         context.BlockOn(EasyCoro::AnyOf(
-            // Sleep(3),
+            Sleep(30),
             EasyCoro::Pull([]() -> EasyCoro::SimpleAwaitable<size_t> {
                 std::cout << "Starting lambda coroutine..." << std::endl;
                 co_return 123;
@@ -114,6 +114,8 @@ int main() {
     } catch (const std::exception &ex) {
         std::cerr << "Caught exception: " << ex.what() << std::endl;
     }
+
+    context.Detach();
 
     std::cout << "Main function completed." << std::endl;
 }
