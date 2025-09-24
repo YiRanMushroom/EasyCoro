@@ -127,7 +127,6 @@ namespace EasyCoro {
     };
 
 
-
     template<typename Promise = PromiseType<void>>
     auto PointerToHandleCast(
         const std::shared_ptr<void> &ptr) -> std::coroutine_handle<Promise>;
@@ -143,6 +142,8 @@ namespace EasyCoro {
 
     export struct Unit {
     };
+
+    SimpleAwaitable<void> Sleep(auto duration);
 
     export template<>
     class SimpleAwaitable<void> {
@@ -255,10 +256,17 @@ namespace EasyCoro {
             return std::nullopt;
         }
 
-        auto Then(this SimpleAwaitable&& self, auto&& func) -> std::invoke_result_t<decltype(func)> {
+        auto Then(this SimpleAwaitable &&self, auto &&func) -> std::invoke_result_t<decltype(func)> {
             co_await std::move(self);
-            using NewReturnType = decltype(func());
             co_return co_await func();
+        }
+
+        template<typename Duration = std::chrono::milliseconds>
+        auto WithTimeOut(this SimpleAwaitable&& self, Duration duration) -> SimpleAwaitable<std::optional<Unit>> {
+            co_return std::get(co_await AnyOf(
+                std::move(self),
+                Sleep(duration)
+            ));
         }
     };
 
@@ -376,10 +384,17 @@ namespace EasyCoro {
             return std::nullopt;
         }
 
-        auto Then(this SimpleAwaitable&& self, auto&& func) -> std::invoke_result_t<decltype(func), Ret> {
+        auto Then(this SimpleAwaitable &&self, auto &&func) -> std::invoke_result_t<decltype(func), Ret> {
             Ret value = co_await std::move(self);
-            using NewReturnType = decltype(func(value));
             co_return co_await func(value);
+        }
+
+        template<typename Duration = std::chrono::milliseconds>
+        auto WithTimeOut(this SimpleAwaitable&& self, Duration duration) -> SimpleAwaitable<std::optional<Ret>> {
+            co_return std::get<0>(co_await AnyOf(
+                std::move(self),
+                Sleep(duration)
+            ));
         }
     };
 
@@ -504,5 +519,41 @@ namespace EasyCoro {
         co_await std::suspend_always{};
 
         co_return std::make_tuple(awaitables.TryGetResult()...);
+    }
+
+
+    export template<typename T>
+    SimpleAwaitable<T> StartWith(T value) {
+        co_return value;
+    }
+
+    export template<typename Func>
+    auto AsynchronousOf(Func func) {
+        return [func = std::forward<Func>(func)]<typename... Args>(Args &&... args) -> SimpleAwaitable<decltype(func(args...))> {
+            co_return func(std::forward<Args>(args)...);
+        };
+    }
+
+    SimpleAwaitable<void> Sleep(auto duration) {
+        std::this_thread::sleep_for(duration);
+        co_return;
+    }
+
+    export template<typename Func>
+    auto TryUntilHasValue(Func func, std::chrono::milliseconds time_interval = std::chrono::milliseconds(100)) {
+        return [func = std::forward<Func>(func), time_interval]<typename... Args>(Args &&... args) -> SimpleAwaitable<typename decltype(func(args...))::value_type> {
+            while (true) {
+                auto value = co_await AsynchronousOf(func)(std::forward<Args>(args)...);
+                if (value) {
+                    co_return value.value();
+                }
+                std::this_thread::sleep_for(time_interval);
+            }
+        };
+    }
+
+    export template<typename Func>
+    auto Pull(Func func) {
+        return func();
     }
 }
