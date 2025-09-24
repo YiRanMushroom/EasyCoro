@@ -379,19 +379,21 @@ namespace EasyCoro {
         std::mutex mutex;
         std::condition_variable cv;
         bool finished = false;
-        auto wrapper = [awaitable = std::move(awaitable), &mutex, &cv, &finished
-                ]() mutable -> SimpleAwaitable<decltype(awaitable.GetResult())> {
-            auto result = co_await awaitable;
-            {
-                std::scoped_lock lock(mutex);
-                finished = true;
-            }
-            cv.notify_one();
-            co_return result;
-        }();
+        auto wrapper = [&awaitable, &mutex, &cv, &finished
+                ]() -> SimpleAwaitable<decltype(awaitable.GetResult())> {
+                    auto result = co_await awaitable;
+                    // Protect
+                    {
+                        std::scoped_lock lock(mutex);
+                        finished = true;
+                    }
+                    cv.notify_one();
+                    co_return result;
+                }();
         auto handlePtr = wrapper.GetHandlePtr();
         auto handle = wrapper.GetHandle();
         Schedule(handlePtr);
+        // Wait
         {
             std::unique_lock lock(mutex);
             cv.wait(lock, [&finished] {
@@ -399,14 +401,6 @@ namespace EasyCoro {
             });
         }
         return wrapper.GetResult();
-        // if (!handle.done()) {
-        //     Schedule(handlePtr);
-        // }
-        // while (!handle.done()) {
-        //     WaitAllTaskToFinish();
-        //     std::this_thread::sleep_for(std::chrono::milliseconds(25));
-        // }
-        // return awaitable.GetResult();
     }
 
     auto PromiseType<void>::get_return_object() {
