@@ -23,6 +23,7 @@ struct ReportDestructor {
 };
 
 EasyCoro::SimpleAwaitable<size_t> Sleep(int time) {
+    ReportDestructor destructor{};
     std::this_thread::sleep_for(std::chrono::seconds(time));
     std::cout << "Slept for " << time << " seconds." << std::endl;
     co_return time;
@@ -41,7 +42,7 @@ int main() {
             NestedCoroutine(ExampleCoroutine(), ExampleCoroutine()),
             Sleep(2),
             Sleep(3, 6, 6, 4),
-            Sleep(1, 3, 4, 5)
+            EasyCoro::AllOf(Sleep(1), Sleep(2), Sleep(3))
         ));
     } catch (const std::exception &ex) {
         std::cerr << "Caught exception: " << ex.what() << std::endl;
