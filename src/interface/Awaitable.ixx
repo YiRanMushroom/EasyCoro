@@ -127,13 +127,14 @@ namespace EasyCoro {
     };
 
 
+
     template<typename Promise = PromiseType<void>>
     auto PointerToHandleCast(
         const std::shared_ptr<void> &ptr) -> std::coroutine_handle<Promise>;
 
-    template<typename Promise>
+    template<typename Ret = void, typename T>
     const std::weak_ptr<void> &HandleToPointerCast(
-        std::coroutine_handle<Promise> handle);
+        std::coroutine_handle<T> handle);
 
     template<typename Promise = PromiseType<void>>
     auto
@@ -240,10 +241,24 @@ namespace EasyCoro {
             return GetMyHandle().promise().IsCancelled;
         }
 
-        void GetResult() {
+        Unit GetResult() {
             auto handle = GetMyHandle();
             assert(handle.done());
             await_resume();
+            return Unit{};
+        }
+
+        std::optional<Unit> TryGetResult() {
+            if (std::holds_alternative<std::monostate>(GetMyHandle().promise().Result)) {
+                return Unit{};
+            }
+            return std::nullopt;
+        }
+
+        auto Then(this SimpleAwaitable&& self, auto&& func) -> std::invoke_result_t<decltype(func)> {
+            co_await std::move(self);
+            using NewReturnType = decltype(func());
+            co_return co_await func();
         }
     };
 
@@ -360,6 +375,12 @@ namespace EasyCoro {
             }
             return std::nullopt;
         }
+
+        auto Then(this SimpleAwaitable&& self, auto&& func) -> std::invoke_result_t<decltype(func), Ret> {
+            Ret value = co_await std::move(self);
+            using NewReturnType = decltype(func(value));
+            co_return co_await func(value);
+        }
     };
 
     auto ExecutionContext::BlockOn(auto &&awaitable) {
@@ -393,11 +414,11 @@ namespace EasyCoro {
             ptr.get());
     }
 
-    template<typename Promise>
+    template<typename Ret, typename T>
     const std::weak_ptr<void> &HandleToPointerCast(
-        std::coroutine_handle<Promise> handle) {
+        std::coroutine_handle<T> handle) {
         assert(handle);
-        return handle.promise().Self;
+        return HandleReinterpretCast<PromiseType<Ret>>(handle).promise().Self;
     }
 
     template<typename Promise>
@@ -427,8 +448,7 @@ namespace EasyCoro {
 
     export template<typename... Awaitables>
     SimpleAwaitable<std::tuple<typename Awaitables::ReturnType...>> AllOf(Awaitables... awaitables) {
-        auto parentHandle = std::coroutine_handle<SimpleAwaitable<void>::PromiseType>::from_address(
-            (co_await AwaitToGetThisHandle{}).address()).promise().Self;
+        auto parentHandle = HandleToPointerCast(co_await AwaitToGetThisHandle{});
 
         std::shared_ptr<std::function<void()>> onChildSuspend = std::make_shared<std::function<
             void()>>(
