@@ -13,15 +13,16 @@ namespace EasyCoro {
     class ExecutionContext {
     public:
         ExecutionContext(size_t threadCount = std::jthread::hardware_concurrency() * 2)
-            : m_ThreadPool(threadCount, [this] {
-                CurrentExecutionContext = this;
-            }, [] {
-                CurrentExecutionContext = nullptr;
-            }) {
-        }
+            : m_ThreadPool{
+                SharedThreadPool::Create(threadCount, [this] {
+                    CurrentExecutionContext = this;
+                }, [] {
+                    CurrentExecutionContext = nullptr;
+                })
+            } {}
 
         void Schedule(const std::shared_ptr<void> &handle) {
-            m_ThreadPool.Enqueue([weak = std::weak_ptr(handle)] {
+            m_ThreadPool->Enqueue([weak = std::weak_ptr(handle)] {
                 if (auto shared = weak.lock()) {
                     std::coroutine_handle<> coroHandle = std::coroutine_handle<>::from_address(shared.get());
                     if (!coroHandle.done()) {
@@ -32,17 +33,17 @@ namespace EasyCoro {
         }
 
         void WaitAllTaskToFinish() {
-            m_ThreadPool.WaitAllTaskToFinish();
+            m_ThreadPool->WaitAllTaskToFinish();
         }
 
         auto BlockOn(auto awaitable);
 
         void Detach() {
-            m_ThreadPool.DetachAll();
+            m_ThreadPool->DetachAll();
         }
 
     private:
-        ThreadPool m_ThreadPool{};
+        std::shared_ptr<SharedThreadPool> m_ThreadPool{};
     };
 
     export ExecutionContext &GetCurrentExecutionContext() {
@@ -144,8 +145,7 @@ namespace EasyCoro {
     HandleReinterpretCast(
         std::coroutine_handle<> handle) -> std::coroutine_handle<Promise>;
 
-    export struct Unit {
-    };
+    export struct Unit {};
 
     SimpleAwaitable<void> Sleep(auto duration);
 
@@ -294,8 +294,7 @@ namespace EasyCoro {
         }
 
     public:
-        ~SimpleAwaitable() {
-        }
+        ~SimpleAwaitable() {}
 
         [[nodiscard]] std::coroutine_handle<> GetHandle() const {
             return GetMyHandle();

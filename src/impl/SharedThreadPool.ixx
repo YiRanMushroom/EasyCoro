@@ -37,57 +37,55 @@ namespace EasyCoro {
         }
     };
 
-    export class ThreadPool : public IThreadPool {
+    export class SharedThreadPool : public IThreadPool {
+        friend class std::shared_ptr<SharedThreadPool>;
+
     public:
-        ThreadPool(size_t size = std::jthread::hardware_concurrency() * 2) {
+        template<typename OnStartUp, typename OnShutDown>
+        static std::shared_ptr<SharedThreadPool> Create(size_t size = std::jthread::hardware_concurrency() * 2,
+                                                        OnStartUp &&onStartUp = {},
+                                                        OnShutDown &&onShutDown = {}) {
+            // ReSharper disable once CppSmartPointerVsMakeFunction
+            auto pool = std::shared_ptr<SharedThreadPool>(new SharedThreadPool(size));
+            pool->SetSelf(pool);
+            pool->Start(std::forward<OnStartUp>(onStartUp), std::forward<OnShutDown>(onShutDown));
+            return pool;
+        }
+
+    protected:
+        SharedThreadPool(size_t size = std::jthread::hardware_concurrency() * 2) {
             m_WorkerThreads.reserve(size);
-            for (size_t i = 0; i < size; ++i) {
-                m_WorkerThreads.emplace_back([this] {
-                    while (!m_ShouldStop) {
-                        std::function<void()> task;
+        }
 
-                        // in a scope
-                        {
-                            std::unique_lock lock(m_Mutex);
-                            m_Condition.wait(lock, [this] { return m_ShouldStop || !m_Tasks.empty(); });
-
-                            if (m_ShouldStop && m_Tasks.empty()) {
-                                return;
-                            }
-
-                            task = std::move(m_Tasks.front());
-                            m_Tasks.pop();
-                        }
-
-                        task();
-                    }
-                });
-            }
+    public:
+        void SetSelf(const std::shared_ptr<SharedThreadPool> &self) {
+            m_Self = self;
         }
 
         template<typename OnStartUp, typename OnShutDown>
-        ThreadPool(size_t size = std::jthread::hardware_concurrency() * 2, OnStartUp &&onStartUp = {},
+        void Start(OnStartUp &&onStartUp = {},
                    OnShutDown &&onShutDown = {}) {
-            m_WorkerThreads.reserve(size);
-            for (size_t i = 0; i < size; ++i) {
-                m_WorkerThreads.emplace_back([this, onStartUp, onShutDown] {
+            for (size_t i = 0; i < m_WorkerThreads.capacity(); ++i) {
+                m_WorkerThreads.emplace_back([self = m_Self.lock(), onStartUp, onShutDown] {
                     if constexpr (std::is_invocable_v<OnStartUp>) {
                         onStartUp();
                     }
-                    while (!m_ShouldStop) {
+                    while (!self->m_ShouldStop) {
                         std::function<void()> task;
 
                         // in a scope
                         {
-                            std::unique_lock lock(m_Mutex);
-                            m_Condition.wait(lock, [this] { return m_ShouldStop || !m_Tasks.empty(); });
+                            std::unique_lock lock(self->m_Mutex);
+                            self->m_Condition.wait(lock, [&self] {
+                                return self->m_ShouldStop || !self->m_Tasks.empty();
+                            });
 
-                            if (m_ShouldStop && m_Tasks.empty()) {
+                            if (self->m_ShouldStop && self->m_Tasks.empty()) {
                                 return;
                             }
 
-                            task = std::move(m_Tasks.front());
-                            m_Tasks.pop();
+                            task = std::move(self->m_Tasks.front());
+                            self->m_Tasks.pop();
                         }
 
                         task();
@@ -108,7 +106,7 @@ namespace EasyCoro {
             m_Condition.notify_one();
         }
 
-        ~ThreadPool() {
+        ~SharedThreadPool() {
             if (m_ShouldStop) {
                 m_WorkerThreads.clear();
                 return;
@@ -150,10 +148,6 @@ namespace EasyCoro {
         std::mutex m_Mutex{};
         std::queue<std::function<void()>> m_Tasks{};
         std::atomic_bool m_ShouldStop{false};
+        std::weak_ptr<SharedThreadPool> m_Self;
     };
-
-    export IThreadPool *GlobalThreadPool() {
-        static ThreadPool pool{};
-        return &pool;
-    }
 }
