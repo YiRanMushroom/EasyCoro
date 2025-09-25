@@ -89,13 +89,16 @@ namespace EasyCoro {
             {
                 std::scoped_lock lock(ResultProtectMutex);
                 Result = std::move(value);
-            }
-            if (OnFinished) {
-                OnFinished();
+                if (OnFinished) {
+                    OnFinished();
+                }
             }
         }
 
-        void unhandled_exception() { Result = std::current_exception(); }
+        void unhandled_exception() {
+            std::scoped_lock lock(ResultProtectMutex);
+            Result = std::current_exception();
+        }
     };
 
     template<>
@@ -122,13 +125,15 @@ namespace EasyCoro {
             {
                 std::scoped_lock lock(ResultProtectMutex);
                 Result = std::monostate{};
+                if (OnFinished)
+                    OnFinished();
             }
-
-            if (OnFinished)
-                OnFinished();
         }
 
-        void unhandled_exception() { Result = std::current_exception(); }
+        void unhandled_exception() {
+            std::scoped_lock lock(ResultProtectMutex);
+            Result = std::current_exception();
+        }
     };
 
 
@@ -193,6 +198,7 @@ namespace EasyCoro {
         void await_suspend(std::coroutine_handle<> parentHandle) {
             if (auto self = GetMyHandle().promise().Self.lock()) {
                 if (!GetMyHandle().promise().OnFinished) {
+                    std::lock_guard lock(GetMyHandle().promise().ResultProtectMutex);
                     GetMyHandle().promise().OnFinished = [
                                 parentHandle = HandleToPointerCast<void>(parentHandle)
                             ]() mutable {
@@ -211,12 +217,14 @@ namespace EasyCoro {
         }
 
         void SetOnFinished(auto &&callback) {
+            std::lock_guard lock(GetMyHandle().promise().ResultProtectMutex);
             GetMyHandle().promise().OnFinished = std::forward<decltype(callback)>(callback);
         }
 
         void await_resume() {
             auto handle = GetMyHandle();
 
+            std::lock_guard lock(handle.promise().ResultProtectMutex);
             auto &variant = handle.promise().Result;
             switch (variant.index()) {
                 case 0:
@@ -234,7 +242,7 @@ namespace EasyCoro {
 
         Unit GetResult() {
             auto handle = GetMyHandle();
-            assert(handle.done());
+            // assert(handle.done());
             await_resume();
             return Unit{};
         }
@@ -246,15 +254,15 @@ namespace EasyCoro {
             return std::nullopt;
         }
 
-        auto Then(this SimpleAwaitable &&self, auto &&func) -> std::invoke_result_t<decltype(func)> {
-            co_await std::move(self);
+        auto Then(this SimpleAwaitable self, auto &&func) -> std::invoke_result_t<decltype(func)> {
+            co_await self;
             co_return co_await func();
         }
 
         template<typename Duration = std::chrono::milliseconds>
-        auto WithTimeOut(this SimpleAwaitable &&self, Duration duration) -> SimpleAwaitable {
+        auto WithTimeOut(this SimpleAwaitable self, Duration duration) -> SimpleAwaitable {
             co_return std::get(co_await AnyOf(
-                std::move(self),
+                self,
                 Sleep(duration)
             ));
         }
@@ -307,6 +315,7 @@ namespace EasyCoro {
 
         void await_suspend(std::coroutine_handle<> parentHandle) {
             if (!GetMyHandle().promise().OnFinished) {
+                std::lock_guard lock(GetMyHandle().promise().ResultProtectMutex);
                 GetMyHandle().promise().OnFinished = [
                             parentHandle = HandleToPointerCast<void>(parentHandle)
                         ]() mutable {
@@ -324,18 +333,20 @@ namespace EasyCoro {
         }
 
         void SetOnFinished(auto &&callback) {
+            std::lock_guard lock(GetMyHandle().promise().ResultProtectMutex);
             GetMyHandle().promise().OnFinished = std::forward<decltype(callback)>(callback);
         }
 
         Ret await_resume() {
             auto handle = GetMyHandle();
 
+            std::lock_guard lock(handle.promise().ResultProtectMutex);
             auto &variant = handle.promise().Result;
             switch (variant.index()) {
                 case 0:
                     throw std::runtime_error("Coroutine did not return a value");
                 case 1:
-                    return std::get<Ret>(std::move(variant));
+                    return std::move(std::get<Ret>(variant));
                 case 2:
                     std::rethrow_exception(std::get<std::exception_ptr>(variant));
                 default:
@@ -349,8 +360,19 @@ namespace EasyCoro {
 
         Ret GetResult() {
             auto handle = GetMyHandle();
-            assert(handle.done());
-            return await_resume();
+            // assert(handle.done());
+
+            std::lock_guard lock(handle.promise().ResultProtectMutex);
+            switch (handle.promise().Result.index()) {
+                case 0:
+                    throw std::runtime_error("Coroutine did not return a value");
+                case 1:
+                    return std::move(std::get<Ret>(handle.promise().Result));
+                case 2:
+                    std::rethrow_exception(std::get<std::exception_ptr>(handle.promise().Result));
+                default:
+                    throw std::runtime_error("Invalid state in coroutine result");
+            }
         }
 
         std::optional<Ret> TryGetResult() {
@@ -360,44 +382,57 @@ namespace EasyCoro {
             return std::nullopt;
         }
 
-        auto Then(this SimpleAwaitable &&self, auto &&func) -> std::invoke_result_t<decltype(func), Ret> {
-            Ret value = co_await std::move(self);
+        auto Then(this SimpleAwaitable self, auto &&func) -> std::invoke_result_t<decltype(func), Ret> {
+            auto value = co_await self;
             co_return co_await func(value);
         }
 
         template<typename Duration = std::chrono::milliseconds>
-        auto WithTimeOut(this SimpleAwaitable &&self, Duration duration) -> SimpleAwaitable<std::optional<Ret>> {
+        auto WithTimeOut(this SimpleAwaitable self, Duration duration) -> SimpleAwaitable<std::optional<Ret>> {
             co_return std::get<0>(co_await AnyOf(
-                std::move(self),
+                self,
                 Sleep(duration)
             ));
+        }
+    };
+
+    template<typename Fn>
+    struct Finally {
+        Fn func;
+
+        Finally(Fn f) : func(std::move(f)) {}
+
+        ~Finally() {
+            func();
         }
     };
 
     auto ExecutionContext::BlockOn(auto awaitable) {
         std::mutex mutex;
         std::condition_variable cv;
-        bool finished = false;
-        auto wrapper = [&awaitable, &mutex, &cv, &finished
+        auto wrapper = [&awaitable, &mutex, &cv
                 ]() -> SimpleAwaitable<decltype(awaitable.GetResult())> {
                     auto result = co_await awaitable;
+                    Finally finally([&] { cv.notify_one(); });
                     // Protect
                     {
                         std::scoped_lock lock(mutex);
-                        finished = true;
+                        co_return result;
                     }
-                    cv.notify_one();
-                    co_return result;
                 }();
         auto handlePtr = wrapper.GetHandlePtr();
         auto handle = wrapper.GetHandle();
         Schedule(handlePtr);
+
         // Wait
         {
             std::unique_lock lock(mutex);
-            cv.wait(lock, [&finished] {
-                return finished;
-            });
+            cv.wait(lock);
+            while (true) {
+                if (handle.done())
+                    break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
         }
         return wrapper.GetResult();
     }
@@ -452,16 +487,14 @@ namespace EasyCoro {
 
     export template<typename... Awaitables>
     SimpleAwaitable<std::tuple<typename Awaitables::ReturnType...>> AllOf(Awaitables... awaitables) {
-        auto parentHandle = HandleToPointerCast(co_await AwaitToGetThisHandle{});
+        auto parentHandle = HandleToPointerCast(co_await AwaitToGetThisHandle{}).lock();
 
         std::shared_ptr<std::function<void()>> onChildSuspend = std::make_shared<std::function<
             void()>>(
 
             [remaining = std::make_shared<std::atomic_size_t>(sizeof...(Awaitables)), parentHandle]() mutable {
                 if (--*remaining == 0) {
-                    if (auto parent = parentHandle.lock()) {
-                        GetCurrentExecutionContext().Schedule(parent);
-                    }
+                    GetCurrentExecutionContext().Schedule(parentHandle);
                 } else {
                     std::cout << *remaining << " awaitables remaining..." << std::endl;
                 }
@@ -482,17 +515,15 @@ namespace EasyCoro {
 
     export template<typename... Awaitables>
     SimpleAwaitable<std::tuple<std::optional<typename Awaitables::ReturnType>...>> AnyOf(Awaitables... awaitables) {
-        auto parentHandle = HandleToPointerCast(co_await AwaitToGetThisHandle{});
+        auto parentHandle = HandleToPointerCast(co_await AwaitToGetThisHandle{}).lock();
 
         std::shared_ptr<std::function<void()>> onChildSuspend = std::make_shared<std::function<
             void()>>(
 
             [Invoked = std::make_shared<std::atomic_bool>(false), parentHandle]() mutable {
-                if (auto parent = parentHandle.lock()) {
-                    bool expected = false;
-                    if (Invoked->compare_exchange_strong(expected, true)) {
-                        GetCurrentExecutionContext().Schedule(parent);
-                    }
+                bool expected = false;
+                if (Invoked->compare_exchange_strong(expected, true)) {
+                    GetCurrentExecutionContext().Schedule(parentHandle);
                 }
             }
         );
@@ -517,7 +548,7 @@ namespace EasyCoro {
 
     export template<typename Func>
     auto AsynchronousOf(Func func) {
-        return [func = std::forward<Func>(func)]<typename... Args>(
+        return [func]<typename... Args>(
             Args &&... args) -> SimpleAwaitable<decltype(func(args...))> {
             co_return func(std::forward<Args>(args)...);
         };
@@ -529,15 +560,21 @@ namespace EasyCoro {
     }
 
     export template<typename Func>
-    auto TryUntilHasValue(Func func, std::chrono::milliseconds time_interval = std::chrono::milliseconds(100)) {
-        return [func = std::forward<Func>(func), time_interval]<typename... Args>(
-            Args &&... args) -> SimpleAwaitable<typename decltype(func(args...))::value_type> {
+    auto TryUntilHasValue(Func func, std::chrono::milliseconds timeInterval = std::chrono::milliseconds(0)) {
+        return [capturedFunc = std::move(func), capturedInterval = timeInterval]<typename... Args>(
+            Args &&... args) mutable -> SimpleAwaitable<typename decltype(func(args...))::value_type> {
+            auto func = std::move(capturedFunc);
+            auto timeInterval = std::move(capturedInterval);
             while (true) {
-                auto value = co_await AsynchronousOf(func)(std::forward<Args>(args)...);
+                auto value = co_await [](
+                    Func &func, Args &&... innerArgs) -> SimpleAwaitable<decltype(func(innerArgs...))> {
+                            co_return func(std::forward<Args>(innerArgs)...);
+                        }(func, std::forward<Args>(args)...);
                 if (value) {
                     co_return value.value();
                 }
-                std::this_thread::sleep_for(time_interval);
+                if (timeInterval.count() > 0)
+                    std::this_thread::sleep_for(timeInterval);
             }
         };
     }

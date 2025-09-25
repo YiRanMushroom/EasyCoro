@@ -76,7 +76,7 @@ namespace EasyCoro {
                         // in a scope
                         {
                             std::unique_lock lock(self->m_Mutex);
-                            self->m_Condition.wait(lock, [&self] {
+                            self->m_Condition.wait_for(lock, std::chrono::milliseconds(10), [&self] {
                                 return self->m_ShouldStop || !self->m_Tasks.empty();
                             });
 
@@ -84,11 +84,21 @@ namespace EasyCoro {
                                 return;
                             }
 
+                            if (self->m_Tasks.empty()) {
+                                continue;
+                            }
+
                             task = std::move(self->m_Tasks.front());
                             self->m_Tasks.pop();
                         }
 
-                        task();
+                        try {
+                            task();
+                        } catch (std::exception &e) {
+                            std::cerr << "Exception in thread pool task: " << e.what() << std::endl;
+                        } catch (...) {
+                            std::cerr << "Unknown exception in thread pool task" << std::endl;
+                        }
                     }
                     if constexpr (std::is_invocable_v<OnShutDown>) {
                         onShutDown();
