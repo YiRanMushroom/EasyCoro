@@ -1,6 +1,8 @@
 import EasyCoro.Awaitable;
 
 import std;
+import <crtdbg.h>;
+import <cstdlib>;
 
 EasyCoro::SimpleAwaitable<double> NestedCoroutine(EasyCoro::SimpleAwaitable<int> inner,
                                                   EasyCoro::SimpleAwaitable<int> inner2) {
@@ -17,16 +19,15 @@ EasyCoro::SimpleAwaitable<int> ExampleCoroutine() {
 }
 
 struct ReportDestructor {
-    ~ReportDestructor() {
-        std::cout << "ReportDestructor destroyed!" << '\n';
-    }
+    // ~ReportDestructor() {
+    //     std::cout << "ReportDestructor destroyed!" << '\n';
+    // }
 };
 
 
 EasyCoro::SimpleAwaitable<size_t> Sleep(int time) {
-    // ReportDestructor destructor{};
-    // std::this_thread::sleep_for(std::chrono::milliseconds(time));
-    std::cout << "Slept for " << time << " milliseconds." << '\n';
+    ReportDestructor destructor{};
+    std::cout << "Slept for " << time << " milliseconds. \n";
     co_return time;
 }
 
@@ -66,60 +67,69 @@ void StartConsoleListener() {
 }
 
 std::optional<std::string> GetConsoleInput() {
-    // std::unique_lock lock(g_ConsoleBuffer.Mutex);
-    // if (g_ConsoleBuffer.Value.has_value()) {
-    //     auto value = std::move(g_ConsoleBuffer.Value);
-    //     g_ConsoleBuffer.Value.reset();
-    //     return value;
-    // }
     return std::nullopt;
 }
 
+std::atomic_size_t g_AllocCount = 0;
 
-int main() {
-    EasyCoro::ExecutionContext context(256);
+int main() { {
+        EasyCoro::ExecutionContext context(16);
 
-    StartConsoleListener();
+        // StartConsoleListener();
 
-    std::string example1 = "Example string 1";
-    std::string example2 = "Example string 2";
-    std::string example3 = "Example string 3";
+        std::string example1 = "Example string 1";
+        std::string example2 = "Example string 2";
+        std::string example3 = "Example string 3";
 
-    try {
-        for (int i = 0; i < 30000; ++i)
-            context.BlockOn(
-                EasyCoro::AllOf(
-                    Sleep(0),
-                    Sleep(0),
-                    Sleep(0),
-                    Sleep(0),
-                    Sleep(0),
-                    EasyCoro::Pull([]() -> EasyCoro::SimpleAwaitable<size_t> {
-                        std::cout << "Starting lambda coroutine...\n";
-                        co_return 123;
-                    }).Then([](size_t value) -> EasyCoro::SimpleAwaitable<std::string> {
-                        std::cout << "Next lambda coroutine with value: " << value << '\n';
-                        co_return "Value is " + std::to_string(value);
-                    }).Then(
-                        [&](std::string str) -> EasyCoro::SimpleAwaitable<void> {
-                            auto &&[in_example1, in_example2, in_example3] = std::tie(example1, example2, example3);
-                            std::cout << "Final lambda coroutine with string: " << str << '\n';
-                            co_await Sleep(0);
-                            std::cout << "Using captured strings: " << in_example1 << ", " << in_example2 << ", " <<
-                                    in_example3 << '\n';
-                            co_return;
-                        }
-                    ).Then([]() -> EasyCoro::SimpleAwaitable<int> {
-                        co_await Sleep(0);
-                        std::cout << "This will print after 2 seconds timeout." << '\n';
-                        co_return 456;
-                    }))
-            );
-    } catch (const std::exception &ex) {
-        std::cerr << "Caught exception: " << ex.what() << std::endl;
+        try {
+            // context.BlockOn(Sleep(0));
+            // context.BlockOn(Sleep(0));
+            for (int i = 0; i < 10000; ++i)
+                context.BlockOn(
+                    EasyCoro::AllOf(Sleep(0), Sleep(0), Sleep(0, 0).Then(
+                                        [](auto) -> EasyCoro::SimpleAwaitable<void> {
+                                            co_await Sleep(0);
+                                            co_return;
+                                        }
+                                    ).WithTimeOut(std::chrono::milliseconds(0))));
+
+            // for (int i = 0; i < 1; ++i)
+            //     context.BlockOn(
+            //         EasyCoro::AllOf(
+            //             Sleep(0),
+            //             EasyCoro::Pull([]() -> EasyCoro::SimpleAwaitable<size_t> {
+            //                 std::cout << "Starting lambda coroutine...\n";
+            //                 co_return 123;
+            //             }).Then([](size_t value) -> EasyCoro::SimpleAwaitable<std::string> {
+            //                 std::cout << "Next lambda coroutine with value: " << value << '\n';
+            //                 co_return "Value is " + std::to_string(value);
+            //             }).Then(
+            //                 [&](std::string str) -> EasyCoro::SimpleAwaitable<void> {
+            //                     auto &&[in_example1, in_example2, in_example3] = std::tie(example1, example2, example3);
+            //                     std::cout << "Final lambda coroutine with string: " << str << '\n';
+            //                     co_await Sleep(0);
+            //                     std::cout << "Using captured strings: " << in_example1 << ", " << in_example2 << ", " <<
+            //                             in_example3 << '\n';
+            //                     co_return;
+            //                 }
+            //             ).Then([]() -> EasyCoro::SimpleAwaitable<int> {
+            //                 co_await Sleep(0);
+            //                 std::cout << "This will print after 2 seconds timeout." << '\n';
+            //                 co_return 456;
+            //             }))
+            //     );
+        } catch (const std::exception &ex) {
+            std::cerr << "Caught exception: " << ex.what() << std::endl;
+        }
+
+        // context.Detach();
     }
 
-    context.Detach();
+    // report memory
+    std::cout << std::endl;
+
+    std::cout << "Alloc count: " << EasyCoro::g_AllocCount.load() << std::endl;
+    std::cout << "Dealloc count: " << EasyCoro::g_DeallocCount.load() << std::endl;
 
     std::cout << "Main function completed." << std::endl;
 }

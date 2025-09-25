@@ -76,7 +76,7 @@ namespace EasyCoro {
                         // in a scope
                         {
                             std::unique_lock lock(self->m_Mutex);
-                            self->m_Condition.wait_for(lock, std::chrono::milliseconds(10), [&self] {
+                            self->m_Condition.wait_for(lock, std::chrono::milliseconds(100), [&self] {
                                 return self->m_ShouldStop || !self->m_Tasks.empty();
                             });
 
@@ -109,10 +109,9 @@ namespace EasyCoro {
 
         void EnqueueFunc(std::function<void()> &&task) override {
             // forward
-            {
-                std::lock_guard lock(m_Mutex);
-                m_Tasks.emplace(std::move(task));
-            }
+
+            std::lock_guard lock(m_Mutex);
+            m_Tasks.emplace(std::move(task));
             m_Condition.notify_one();
         }
 
