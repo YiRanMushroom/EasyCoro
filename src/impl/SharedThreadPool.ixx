@@ -108,8 +108,6 @@ namespace EasyCoro {
         }
 
         void EnqueueFunc(std::function<void()> &&task) override {
-            // forward
-
             std::lock_guard lock(m_Mutex);
             m_Tasks.emplace(std::move(task));
             m_Condition.notify_one();

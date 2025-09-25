@@ -1,7 +1,7 @@
 import EasyCoro.Awaitable;
 
 import std;
-import <crtdbg.h>;
+import <cassert>;
 import <cstdlib>;
 
 EasyCoro::SimpleAwaitable<double> NestedCoroutine(EasyCoro::SimpleAwaitable<int> inner,
@@ -26,8 +26,7 @@ struct ReportDestructor {
 
 
 EasyCoro::SimpleAwaitable<size_t> Sleep(int time) {
-    ReportDestructor destructor{};
-    std::cout << "Slept for " << time << " milliseconds. \n";
+    std::this_thread::sleep_for(std::chrono::milliseconds(time));
     co_return time;
 }
 
@@ -72,52 +71,74 @@ std::optional<std::string> GetConsoleInput() {
 
 std::atomic_size_t g_AllocCount = 0;
 
+EasyCoro::SimpleAwaitable<size_t> (*SleepPtr)(int) = Sleep;
+
 int main() { {
         EasyCoro::ExecutionContext context(16);
-
-        // StartConsoleListener();
 
         std::string example1 = "Example string 1";
         std::string example2 = "Example string 2";
         std::string example3 = "Example string 3";
 
         try {
-            // context.BlockOn(Sleep(0));
-            // context.BlockOn(Sleep(0));
-            for (int i = 0; i < 10000; ++i)
+            auto now = std::chrono::high_resolution_clock::now();
+            for (int i = 0; i < 10000; ++i) {
                 context.BlockOn(
-                    EasyCoro::AllOf(Sleep(0), Sleep(0), Sleep(0, 0).Then(
-                                        [](auto) -> EasyCoro::SimpleAwaitable<void> {
-                                            co_await Sleep(0);
-                                            co_return;
-                                        }
-                                    ).WithTimeOut(std::chrono::milliseconds(0))));
-
-            // for (int i = 0; i < 1; ++i)
-            //     context.BlockOn(
-            //         EasyCoro::AllOf(
-            //             Sleep(0),
-            //             EasyCoro::Pull([]() -> EasyCoro::SimpleAwaitable<size_t> {
-            //                 std::cout << "Starting lambda coroutine...\n";
-            //                 co_return 123;
-            //             }).Then([](size_t value) -> EasyCoro::SimpleAwaitable<std::string> {
-            //                 std::cout << "Next lambda coroutine with value: " << value << '\n';
-            //                 co_return "Value is " + std::to_string(value);
-            //             }).Then(
-            //                 [&](std::string str) -> EasyCoro::SimpleAwaitable<void> {
-            //                     auto &&[in_example1, in_example2, in_example3] = std::tie(example1, example2, example3);
-            //                     std::cout << "Final lambda coroutine with string: " << str << '\n';
-            //                     co_await Sleep(0);
-            //                     std::cout << "Using captured strings: " << in_example1 << ", " << in_example2 << ", " <<
-            //                             in_example3 << '\n';
-            //                     co_return;
-            //                 }
-            //             ).Then([]() -> EasyCoro::SimpleAwaitable<int> {
-            //                 co_await Sleep(0);
-            //                 std::cout << "This will print after 2 seconds timeout." << '\n';
-            //                 co_return 456;
-            //             }))
-            //     );
+                    EasyCoro::AnyOf(
+                        Sleep(0),
+                        EasyCoro::Pull([]() -> EasyCoro::SimpleAwaitable<std::optional<size_t>> {
+                            std::cout << "Random coroutine";
+                            if (rand() % 2 == 0) {
+                                co_return std::optional<size_t>{123};
+                            }
+                            co_return std::nullopt;
+                        }).UnwrapOrDefault()
+                    )
+                );
+                // context.BlockOn(
+                //     EasyCoro::AllOf(
+                //         Sleep(0),
+                //         EasyCoro::Pull([]() -> EasyCoro::SimpleAwaitable<std::optional<size_t>> {
+                //             std::cout << "Starting lambda coroutine...\n";
+                //             co_return std::optional<size_t>{123};
+                //         }).UnwrapOrCancel()
+                //         .Then([](size_t value) -> EasyCoro::SimpleAwaitable<std::string> {
+                //             std::cout << "Next lambda coroutine with value: " << value << '\n';
+                //             co_return "Value is " + std::to_string(value);
+                //         }).Then(
+                //             [&](std::string str) -> EasyCoro::SimpleAwaitable<void> {
+                //                 auto &&[in_example1, in_example2, in_example3] = std::tie(example1, example2, example3);
+                //                 std::cout << "Final lambda coroutine with string: " << str << '\n';
+                //                 co_await Sleep(0).Then([](int) -> EasyCoro::SimpleAwaitable<size_t> {
+                //                     co_return co_await Sleep(0).Then([](int) -> EasyCoro::SimpleAwaitable<size_t> {
+                //                         co_return co_await Sleep(0).Then([](int) -> EasyCoro::SimpleAwaitable<size_t> {
+                //                             co_return (co_await Sleep(0).Then(
+                //                                 [](int) -> EasyCoro::SimpleAwaitable<size_t> {
+                //                                     co_return co_await Sleep(0).Then(
+                //                                         [](int) -> EasyCoro::SimpleAwaitable<size_t> {
+                //                                             co_return co_await Sleep(0).Then(
+                //                                                 [](int) -> EasyCoro::SimpleAwaitable<size_t> {
+                //                                                     co_return co_await Sleep(0).Then(SleepPtr);
+                //                                                 });
+                //                                         });
+                //                                 }).WithTimeOut(std::chrono::milliseconds(0))).value_or(0);
+                //                         });
+                //                     });
+                //                 });
+                //                 std::cout << "Using captured strings: " << in_example1 << ", " << in_example2 << ", " <<
+                //                         in_example3 << '\n';
+                //                 co_return;
+                //             }
+                //         ).Then([]() -> EasyCoro::SimpleAwaitable<int> {
+                //             co_await Sleep(0);
+                //             std::cout << "This will print after 2 seconds timeout." << '\n';
+                //             co_return 456;
+                //         }))
+                // );
+            }
+            auto later = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(later - now).count();
+            std::cout << "Total duration for 10000 iterations: " << duration << " ms" << std::endl;
         } catch (const std::exception &ex) {
             std::cerr << "Caught exception: " << ex.what() << std::endl;
         }
@@ -127,6 +148,8 @@ int main() { {
 
     // report memory
     std::cout << std::endl;
+
+    // std::this_thread::sleep_for(std::chrono::seconds(2));
 
     std::cout << "Alloc count: " << EasyCoro::g_AllocCount.load() << std::endl;
     std::cout << "Dealloc count: " << EasyCoro::g_DeallocCount.load() << std::endl;

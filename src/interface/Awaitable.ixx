@@ -10,11 +10,27 @@ namespace EasyCoro {
     struct Finally {
         Fn func;
 
-        Finally(Fn f) : func(std::move(f)) {}
+        Finally(Fn f) : func(std::move(f)) {
+        }
 
         ~Finally() {
             func();
         }
+    };
+
+    template<typename Fn>
+    struct AwaitToDo : std::suspend_always {
+        Fn func;
+
+        AwaitToDo(Fn f) : func(std::move(f)) {
+        }
+
+        void await_suspend(std::coroutine_handle<>) {
+            func();
+        }
+    };
+
+    export struct Unit {
     };
 
     export class ExecutionContext;
@@ -33,20 +49,31 @@ namespace EasyCoro {
                 }, [] {
                     CurrentExecutionContext = nullptr;
                 })
-            } {}
+            } {
+        }
 
-        void Schedule(const std::shared_ptr<void> &handle) {
+        void Schedule(std::shared_ptr<void> handle) {
             m_ThreadPool->Enqueue([weak = std::weak_ptr(handle)] {
                 if (auto shared = weak.lock()) {
                     std::coroutine_handle<> coroHandle = std::coroutine_handle<>::from_address(shared.get());
                     if (!coroHandle.done()) {
                         coroHandle.resume();
                     }
-                } else {
-                    std::cerr << "Warning: Attempted to schedule a coroutine that has already been destroyed.\n";
                 }
             });
         }
+
+        // void ScheduleStrong(std::shared_ptr<void> handle) {
+        //     if (!handle) {
+        //         throw std::runtime_error("Cannot schedule a null handle");
+        //     }
+        //     m_ThreadPool->Enqueue([handle = std::move(handle)]() mutable {
+        //         std::coroutine_handle<> coroHandle = std::coroutine_handle<>::from_address(handle.get());
+        //         if (!coroHandle.done()) {
+        //             coroHandle.resume();
+        //         }
+        //     });
+        // }
 
         void WaitAllTaskToFinish() {
             m_ThreadPool->WaitAllTaskToFinish();
@@ -112,6 +139,18 @@ namespace EasyCoro {
             }
         }
 
+        void return_value(Unit) {
+            if (!IsCancelled) {
+                throw std::runtime_error("Cannot return void from non-void coroutine which is not canceled");
+            }
+        }
+
+        // void return_void() const {
+        //     if (!IsCancelled) {
+        //         throw std::runtime_error("Cannot return void from non-void coroutine which is not canceled");
+        //     }
+        // }
+
         void unhandled_exception() {
             std::scoped_lock lock(ResultProtectMutex);
             Result = std::current_exception();
@@ -167,7 +206,6 @@ namespace EasyCoro {
     HandleReinterpretCast(
         std::coroutine_handle<> handle) -> std::coroutine_handle<Promise>;
 
-    export struct Unit {};
 
     SimpleAwaitable<void> Sleep(auto duration);
 
@@ -291,7 +329,68 @@ namespace EasyCoro {
     };
 
     template<typename Ret>
-    class SimpleAwaitable {
+    class InjectUnwraps {
+    };
+
+    template<typename Ret> requires requires(Ret ret) {
+        { static_cast<bool>(ret) } -> std::convertible_to<bool>;
+        { *ret } -> std::convertible_to<typename Ret::value_type>;
+    }
+    class InjectUnwraps<Ret> {
+    public:
+        auto UnwrapOrCancel(this SimpleAwaitable<Ret> self) -> SimpleAwaitable<typename Ret::value_type> {
+            auto value = co_await self;
+            if (value) {
+                co_return *value;
+            }
+            self.Cancel();
+            co_return Unit{};
+        }
+
+        auto UnWrapOr(this SimpleAwaitable<Ret> self, auto provider) -> SimpleAwaitable<typename Ret::value_type> {
+            auto value = co_await self;
+            if (value) {
+                co_return *value;
+            }
+            if constexpr (std::is_same_v<std::invoke_result_t<decltype(provider)>, typename Ret::value_type>) {
+                co_return provider();
+            } else if constexpr (std::is_same_v<std::invoke_result_t<decltype(provider)>, SimpleAwaitable<typename
+                Ret::value_type>>) {
+                co_return co_await provider();
+            }
+            if constexpr (std::is_same_v<decltype(provider), typename Ret::value_type>) {
+                co_return provider;
+            } else {
+                static_assert([] { return false; }(),
+                              "Provider must be a callable returning the value type or an awaitable of the value type, or the value type itself.")
+                        ;
+            }
+        }
+
+        auto UnwrapOrDefault(this SimpleAwaitable<Ret> self) -> SimpleAwaitable<typename Ret::value_type> {
+            auto value = co_await self;
+            if (value) {
+                co_return *value;
+            }
+            co_return typename Ret::value_type{};
+        }
+
+        auto Unwrap(this SimpleAwaitable<Ret> self) -> SimpleAwaitable<typename Ret::value_type> {
+            co_return *co_await self;
+        }
+
+        auto UnwrapOrThrow(this SimpleAwaitable<Ret> self) -> SimpleAwaitable<typename Ret::value_type> {
+            auto value = co_await self;
+            if (value) {
+                co_return *value;
+            }
+            throw std::runtime_error(std::format("Attempted to unwrap an empty {} in SimpleAwaitable",
+                                                 typeid(Ret).name()));
+        }
+    };
+
+    template<typename Ret>
+    class SimpleAwaitable : public InjectUnwraps<Ret> {
     public:
         using ReturnType = Ret;
 
@@ -425,17 +524,13 @@ namespace EasyCoro {
 
 
     auto ExecutionContext::BlockOn(auto awaitable) {
-        std::mutex mutex;
-        std::condition_variable cv;
-        auto wrapper = [&awaitable, &mutex, &cv
-                ]() -> SimpleAwaitable<decltype(awaitable.GetResult())> {
+        std::binary_semaphore semaphore(0);
+        auto wrapper = [awaitable = std::move(awaitable), &semaphore
+                ]() mutable -> SimpleAwaitable<decltype(awaitable.GetResult())> {
                     auto result = co_await awaitable;
-                    Finally finally([&] { cv.notify_one(); });
+                    Finally finally([&] { semaphore.release(1); });
                     // Protect
-                    {
-                        std::scoped_lock lock(mutex);
-                        co_return result;
-                    }
+                    co_return result;
                 }();
         auto handlePtr = wrapper.GetHandlePtr();
         auto handle = wrapper.GetHandle();
@@ -443,8 +538,7 @@ namespace EasyCoro {
 
         // Wait
         {
-            std::unique_lock lock(mutex);
-            cv.wait_for(lock, std::chrono::milliseconds(1));
+            semaphore.acquire();
             while (true) {
                 if (handle.done())
                     break;
@@ -510,19 +604,14 @@ namespace EasyCoro {
         });
 
         auto parentHandle = HandleToPointerCast(co_await AwaitToGetThisHandle{}).lock();
-        std::mutex ReScheduleMutex;
-        ReScheduleMutex.lock();
 
         std::shared_ptr<std::function<void()>> onChildSuspend = std::make_shared<std::function<
             void()>>(
 
-            [remaining = std::make_shared<std::atomic_size_t>(sizeof...(Awaitables)), parentHandle, &ReScheduleMutex]() mutable {
-                if (--*remaining == 0) {
-                    ReScheduleMutex.lock();
-                    GetCurrentExecutionContext().Schedule(parentHandle);
-                    ReScheduleMutex.unlock();
-                } else {
-                    std::cout << *remaining << " awaitables remaining..." << std::endl;
+            [remaining = std::make_shared<std::atomic_size_t>(sizeof...(Awaitables)), parentHandle
+            ]() mutable {
+                if (auto thisRemaining = --*remaining; thisRemaining == 0) {
+                    GetCurrentExecutionContext().Schedule(std::exchange(parentHandle, nullptr));
                 }
             }
         );
@@ -531,21 +620,14 @@ namespace EasyCoro {
             (*onChildSuspend)();
         })), ...);
 
-        (GetCurrentExecutionContext().Schedule(
-            awaitables.GetHandlePtr()), ...);
+        AwaitToDo awaiter([&] {
+            (GetCurrentExecutionContext().Schedule(
+                awaitables.GetHandlePtr()), ...);
+        });
 
-        struct AwaitUnlocker : std::suspend_always {
-            std::mutex &Mutex;
-
-            void await_suspend(std::coroutine_handle<>) noexcept {
-                Mutex.unlock();
-            }
-        } awaitUnlocker{.Mutex = ReScheduleMutex};
-
-        co_await awaitUnlocker;
+        co_await awaiter;
 
         auto result = std::make_tuple(std::move(awaitables.GetResult())...);
-
         co_return result;
     }
 
@@ -554,20 +636,20 @@ namespace EasyCoro {
         Finally finally([&] {
             (awaitables.Reset(), ...);
         });
+
         auto parentHandle = HandleToPointerCast(co_await AwaitToGetThisHandle{}).lock();
 
-        std::mutex ReScheduleMutex;
-        ReScheduleMutex.lock();
+        std::binary_semaphore startSemaphore(0);
 
-        std::shared_ptr<std::function<void()>> onChildSuspend = std::make_shared<std::function<
+        auto onChildSuspend = std::make_shared<std::function<
             void()>>(
 
-            [Invoked = std::make_shared<std::atomic_bool>(false), parentHandle, &ReScheduleMutex]() mutable {
+            [Invoked = std::make_shared<std::atomic_bool>(false), parentHandle, &startSemaphore
+            ]() mutable {
                 bool expected = false;
                 if (Invoked->compare_exchange_strong(expected, true)) {
-                    ReScheduleMutex.lock();
-                    GetCurrentExecutionContext().Schedule(parentHandle);
-                    ReScheduleMutex.unlock();
+                    startSemaphore.acquire();
+                    GetCurrentExecutionContext().Schedule(std::exchange(parentHandle, nullptr));
                 }
             }
         );
@@ -576,18 +658,14 @@ namespace EasyCoro {
             (*onChildSuspend)();
         })), ...);
 
-        (GetCurrentExecutionContext().Schedule(
-            awaitables.GetHandlePtr()), ...);
 
-        struct AwaitUnlocker : std::suspend_always {
-            std::mutex &Mutex;
+        AwaitToDo awaiter([&] {
+            (GetCurrentExecutionContext().Schedule(
+                awaitables.GetHandlePtr()), ...);
+            startSemaphore.release(1);
+        });
 
-            void await_suspend(std::coroutine_handle<>) noexcept {
-                Mutex.unlock();
-            }
-        } awaitUnlocker{.Mutex = ReScheduleMutex};
-
-        co_await awaitUnlocker;
+        co_await awaiter;
 
         auto result = std::make_tuple(std::move(awaitables.TryGetResult())...);
         co_return result;
