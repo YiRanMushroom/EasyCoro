@@ -107,7 +107,7 @@ int main() {
     std::atomic_size_t counter = 0;
     // Inner
     {
-        EasyCoro::ExecutionContext context(16);
+        EasyCoro::ExecutionContext context(32);
 
         std::string example1 = "Example string 1";
         std::string example2 = "Example string 2";

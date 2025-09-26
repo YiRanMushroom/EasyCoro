@@ -42,13 +42,13 @@ namespace EasyCoro {
 
     public:
         template<typename OnStartUp, typename OnShutDown>
-        static std::shared_ptr<SharedThreadPool> Create(size_t size = std::jthread::hardware_concurrency() * 2,
-                                                        OnStartUp &&onStartUp = {},
-                                                        OnShutDown &&onShutDown = {}) {
+        static std::shared_ptr<IThreadPool> Create(size_t size = std::jthread::hardware_concurrency() * 2,
+                                                   OnStartUp &&onStartUp = {},
+                                                   OnShutDown &&onShutDown = {}) {
             // ReSharper disable once CppSmartPointerVsMakeFunction
             auto pool = std::shared_ptr<SharedThreadPool>(new SharedThreadPool(size));
             pool->SetSelf(pool);
-            pool->Start(std::forward<OnStartUp>(onStartUp), std::forward<OnShutDown>(onShutDown));
+            Start(pool, std::forward<OnStartUp>(onStartUp), std::forward<OnShutDown>(onShutDown));
             return pool;
         }
 
@@ -63,10 +63,10 @@ namespace EasyCoro {
         }
 
         template<typename OnStartUp, typename OnShutDown>
-        void Start(OnStartUp &&onStartUp = {},
-                   OnShutDown &&onShutDown = {}) {
-            for (size_t i = 0; i < m_WorkerThreads.capacity(); ++i) {
-                m_WorkerThreads.emplace_back([self = m_Self.lock(), onStartUp, onShutDown] {
+        static std::shared_ptr<IThreadPool> Start(std::shared_ptr<SharedThreadPool> self, OnStartUp &&onStartUp = {},
+                                                  OnShutDown &&onShutDown = {}) {
+            for (size_t i = 0; i < self->m_WorkerThreads.capacity(); ++i) {
+                self->m_WorkerThreads.emplace_back([self = self->m_Self.lock(), onStartUp, onShutDown] {
                     if constexpr (std::is_invocable_v<OnStartUp>) {
                         onStartUp();
                     }
@@ -105,6 +105,7 @@ namespace EasyCoro {
                     }
                 });
             }
+            return self;
         }
 
         void EnqueueFunc(std::function<void()> &&task) override {
@@ -156,5 +157,31 @@ namespace EasyCoro {
         std::queue<std::function<void()>> m_Tasks{};
         std::atomic_bool m_ShouldStop{false};
         std::weak_ptr<SharedThreadPool> m_Self;
+    };
+
+    export class StandardThreadPool : public IThreadPool {
+    public:
+        StandardThreadPool() = default;
+
+        void EnqueueFunc(std::function<void()> &&task) override = 0;
+        /*{
+            std::binary_semaphore sem1(0), sem2(0);
+            std::atomic<std::shared_ptr<std::future<void>>> shared_ptr = std::make_shared<std::future<void>>(std::async(
+                std::launch::async, [&, task = std::move(task)] {
+                    sem1.acquire();
+                    auto copy = shared_ptr.load();
+                    sem2.release();
+                    task();
+                }));
+            sem1.release();
+            sem2.acquire();
+            shared_ptr.store(nullptr);
+        }*/
+
+
+        static std::shared_ptr<IThreadPool> Create() {
+            // return std::shared_ptr<IThreadPool>(std::make_shared<StandardThreadPool>());
+            throw std::logic_error("StandardThreadPool is not implemented");
+        }
     };
 }

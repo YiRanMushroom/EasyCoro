@@ -39,21 +39,21 @@ namespace EasyCoro {
 
     export class ExecutionContext;
 
-    export thread_local ExecutionContext *CurrentExecutionContext = nullptr;
-
     export std::atomic_size_t g_AllocCount = 0;
     export std::atomic_size_t g_DeallocCount = 0;
+
+    export struct UseStandardExecutionContext {};
 
     class ExecutionContext {
     public:
         ExecutionContext(size_t threadCount = std::jthread::hardware_concurrency() * 2)
             : m_ThreadPool{
-                SharedThreadPool::Create(threadCount, [this] {
-                    CurrentExecutionContext = this;
-                }, [] {
-                    CurrentExecutionContext = nullptr;
-                })
+                SharedThreadPool::Create(threadCount, [this] {}, [] {})
             } {}
+
+        ExecutionContext(UseStandardExecutionContext) : m_ThreadPool{
+            StandardThreadPool::Create()
+        } {}
 
         void Schedule(std::shared_ptr<void> handle) {
             m_ThreadPool->Enqueue([weak = std::weak_ptr(handle)] {
@@ -77,42 +77,32 @@ namespace EasyCoro {
             });
         }
 
-        void WaitAllTaskToFinish() {
-            m_ThreadPool->WaitAllTaskToFinish();
-        }
-
         template<typename Ret>
         Ret BlockOn(SimpleAwaitable<Ret> awaitable);
 
-        void Detach() {
-            m_ThreadPool->DetachAll();
-        }
-
     private:
-        std::shared_ptr<SharedThreadPool> m_ThreadPool{};
+        std::shared_ptr<IThreadPool> m_ThreadPool{};
     };
-
-    export ExecutionContext &GetCurrentExecutionContext() {
-        if (!CurrentExecutionContext) {
-            throw std::runtime_error("No current execution context set");
-        }
-
-        return *CurrentExecutionContext;
-    }
-
-
-    // template<typename Ret>
-    // SimpleAwaitable<Ret> MakeAwaitableFromPromise(
-    //     auto &&handle
-    // );
 
     struct PromiseBase {
         std::weak_ptr<void> Self{};
         std::atomic_bool IsCancelled = false;
         std::atomic_bool NotCancellable = false;
         std::function<void()> OnFinished = nullptr;
+        ExecutionContext *Context = nullptr;
 
         std::optional<std::shared_ptr<void>> DetachedSelf = std::nullopt;
+
+        void Schedule() const {
+            if (auto self = Self.lock()) {
+                if (Context) {
+                    Context->Schedule(self);
+                } else {
+                    __debugbreak();
+                    throw std::runtime_error("No execution context set in coroutine promise");
+                }
+            }
+        }
     };
 
     template<typename Ret>
@@ -208,7 +198,7 @@ namespace EasyCoro {
 
     template<typename Promise = PromiseBase> requires std::is_base_of_v<PromiseBase, Promise>
     auto PointerToHandleCast(
-        const std::shared_ptr<void> &ptr) -> std::coroutine_handle<Promise>;
+        std::shared_ptr<void> ptr) -> std::coroutine_handle<Promise>;
 
     template<typename T>
     const std::weak_ptr<void> &HandleToPointerCast(
@@ -249,7 +239,7 @@ namespace EasyCoro {
             handle.promise().Self = m_MyHandlePtr;
         }
 
-    protected:
+        // protected:
         std::coroutine_handle<PromiseType> GetMyHandle() const {
             return PointerToHandleCast<PromiseType>(m_MyHandlePtr);
         }
@@ -278,19 +268,21 @@ namespace EasyCoro {
                         GetMyHandle().promise().OnFinished = [
                                     strongParent = HandleToPointerCast(parentHandle).lock()
                                 ] mutable {
-                                    GetCurrentExecutionContext().Schedule(std::exchange(strongParent, nullptr));
+                                    PointerToHandleCast<PromiseBase>(strongParent).promise().Schedule();
                                 };
                     } else {
                         GetMyHandle().promise().OnFinished = [
                             parentHandle = HandleToPointerCast<void>(parentHandle)
                         ] {
                             if (auto copied = parentHandle.lock()) {
-                                GetCurrentExecutionContext().Schedule(copied);
+                                PointerToHandleCast<PromiseBase>(copied).promise().Schedule();
                             }
                         };
                     }
                 }
-                GetCurrentExecutionContext().Schedule(self);
+                SetContext(HandleReinterpretCast<PromiseBase>(parentHandle).promise().Context);
+                assert(HandleReinterpretCast<PromiseBase>(parentHandle).promise().Context);
+                PointerToHandleCast<PromiseBase>(self).promise().Schedule();
             } else {
                 __debugbreak();
             }
@@ -315,6 +307,10 @@ namespace EasyCoro {
         void SetOnFinished(auto &&callback) {
             std::lock_guard lock(GetMyHandle().promise().ResultProtectMutex);
             GetMyHandle().promise().OnFinished = std::forward<decltype(callback)>(callback);
+        }
+
+        void SetContext(ExecutionContext *context) {
+            GetMyHandle().promise().Context = context;
         }
 
         void await_resume() {
@@ -385,7 +381,8 @@ namespace EasyCoro {
             AwaitToDo awaiter([](std::coroutine_handle<> thisHandle) {
                 auto myHandle = HandleReinterpretCast<PromiseType<Ret>>(thisHandle);
                 myHandle.promise().Cancel();
-                GetCurrentExecutionContext().Schedule(HandleToPointerCast<void>(thisHandle).lock());
+                // GetCurrentExecutionContext().Schedule(HandleToPointerCast<void>(thisHandle).lock());
+                HandleReinterpretCast<PromiseBase>(thisHandle).promise().Schedule();
             });
 
             co_await awaiter;
@@ -465,7 +462,7 @@ namespace EasyCoro {
             handle.promise().Self = m_MyHandlePtr;
         }
 
-    protected:
+        // protected:
         std::coroutine_handle<PromiseType> GetMyHandle() const {
             return PointerToHandleCast<PromiseType>(m_MyHandlePtr);
         }
@@ -496,19 +493,24 @@ namespace EasyCoro {
                         GetMyHandle().promise().OnFinished = [
                                     strongParent = HandleToPointerCast(parentHandle).lock()
                                 ] mutable {
-                                    GetCurrentExecutionContext().Schedule(std::exchange(strongParent, nullptr));
+                                    // GetCurrentExecutionContext().Schedule(std::exchange(strongParent, nullptr));
+                                    PointerToHandleCast<PromiseBase>(std::exchange(strongParent, nullptr)).promise().
+                                            Schedule();
                                 };
                     } else {
                         GetMyHandle().promise().OnFinished = [
                             parentHandle = HandleToPointerCast<void>(parentHandle)
                         ] {
                             if (auto copied = parentHandle.lock()) {
-                                GetCurrentExecutionContext().Schedule(copied);
+                                // GetCurrentExecutionContext().Schedule(copied);
+                                PointerToHandleCast<PromiseBase>(copied).promise().Schedule();
                             }
                         };
                     }
                 }
-                GetCurrentExecutionContext().Schedule(self);
+                // GetCurrentExecutionContext().Schedule(self);
+                SetContext(HandleReinterpretCast<PromiseBase>(parentHandle).promise().Context);
+                PointerToHandleCast<PromiseBase>(self).promise().Schedule();
             } else {
                 __debugbreak();
             }
@@ -535,6 +537,10 @@ namespace EasyCoro {
         void SetOnFinished(auto &&callback) {
             std::lock_guard lock(GetMyHandle().promise().ResultProtectMutex);
             GetMyHandle().promise().OnFinished = std::forward<decltype(callback)>(callback);
+        }
+
+        void SetContext(ExecutionContext *context) {
+            GetMyHandle().promise().Context = context;
         }
 
         Ret await_resume() {
@@ -614,7 +620,9 @@ namespace EasyCoro {
         });
 
         auto handlePtr = wrapper.GetHandlePtr();
-        Schedule(handlePtr);
+
+        wrapper.SetContext(this);
+        wrapper.GetMyHandle().promise().Schedule();
 
         semaphore.acquire();
 
@@ -636,7 +644,9 @@ namespace EasyCoro {
         });
 
         auto handlePtr = wrapper.GetHandlePtr();
-        Schedule(handlePtr);
+
+        wrapper.SetContext(this);
+        wrapper.GetMyHandle().promise().Schedule();
 
         semaphore.acquire();
 
@@ -656,7 +666,7 @@ namespace EasyCoro {
 
     template<typename Promise> requires std::is_base_of_v<PromiseBase, Promise>
     auto PointerToHandleCast(
-        const std::shared_ptr<void> &ptr) -> std::coroutine_handle<Promise> {
+        std::shared_ptr<void> ptr) -> std::coroutine_handle<Promise> {
         assert(ptr);
         return std::coroutine_handle<Promise>::from_address(
             ptr.get());
@@ -684,7 +694,8 @@ namespace EasyCoro {
 
         void await_suspend(std::coroutine_handle<> handle) {
             parentHandle = handle;
-            GetCurrentExecutionContext().Schedule(HandleToPointerCast<void>(handle).lock());
+            // GetCurrentExecutionContext().Schedule(HandleToPointerCast<void>(handle).lock());
+            HandleReinterpretCast<PromiseBase>(handle).promise().Schedule();
         }
 
         std::coroutine_handle<> await_resume() const noexcept {
@@ -705,7 +716,8 @@ namespace EasyCoro {
             [&remaining, parentHandle, &semaphore]() mutable {
                 if (auto thisRemaining = --remaining; thisRemaining == 0) {
                     semaphore.acquire();
-                    GetCurrentExecutionContext().Schedule(std::exchange(parentHandle, nullptr));
+                    // GetCurrentExecutionContext().Schedule(std::exchange(parentHandle, nullptr));
+                    PointerToHandleCast<PromiseBase>(std::exchange(parentHandle, nullptr)).promise().Schedule();
                 }
             }
         );
@@ -714,9 +726,13 @@ namespace EasyCoro {
             (*onChildSuspend)();
         })), ...);
 
+        ExecutionContext *context = PointerToHandleCast<PromiseBase>(parentHandle).promise().Context;
+        ((awaitables.SetContext(context)), ...);
+
         AwaitToDo awaiter([&] {
-            (GetCurrentExecutionContext().Schedule(
-                awaitables.GetHandlePtr()), ...);
+            // (GetCurrentExecutionContext().Schedule(
+            //     awaitables.GetHandlePtr()), ...);
+            (awaitables.GetMyHandle().promise().Schedule(), ...);
 
             semaphore.release(1);
         });
@@ -744,7 +760,7 @@ namespace EasyCoro {
                 bool expected = false;
                 if (invoked.compare_exchange_strong(expected, true)) {
                     semaphore.acquire();
-                    GetCurrentExecutionContext().Schedule(parentHandle);
+                    PointerToHandleCast<PromiseBase>(parentHandle).promise().Schedule();
                 }
             }
         );
@@ -753,13 +769,15 @@ namespace EasyCoro {
             (*onChildSuspend)();
         })), ...);
 
+        ExecutionContext *context = PointerToHandleCast<PromiseBase>(parentHandle).promise().Context;
+        ((awaitables.SetContext(context)), ...);
+
         AwaitToDo awaiter([&] {
             auto applier = [](auto &awaitable) {
-                auto &context = GetCurrentExecutionContext();
                 if (awaitable.IsCancellable()) {
-                    context.Schedule(awaitable.GetHandlePtr());
+                    awaitable.GetMyHandle().promise().Schedule();
                 } else {
-                    context.Schedule(awaitable.GetHandlePtr());
+                    awaitable.GetMyHandle().promise().Schedule();
                 }
             };
 
