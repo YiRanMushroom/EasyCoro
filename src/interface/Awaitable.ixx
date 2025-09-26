@@ -101,10 +101,10 @@ namespace EasyCoro {
     }
 
 
-    template<typename Ret>
-    SimpleAwaitable<Ret> MakeAwaitableFromPromise(
-        auto &&handle
-    );
+    // template<typename Ret>
+    // SimpleAwaitable<Ret> MakeAwaitableFromPromise(
+    //     auto &&handle
+    // );
 
     struct PromiseBase {
         std::weak_ptr<void> Self{};
@@ -124,10 +124,7 @@ namespace EasyCoro {
             IsCancelled = true;
         }
 
-        auto get_return_object() {
-            ++g_AllocCount;
-            return MakeAwaitableFromPromise<Ret>(std::coroutine_handle<PromiseType>::from_promise(*this));
-        }
+        SimpleAwaitable<Ret> get_return_object();
 
         std::suspend_always initial_suspend() {
             return {};
@@ -525,6 +522,8 @@ namespace EasyCoro {
             self.GetMyHandle().promise().NotCancellable = !value;
             if (value == false) {
                 self.GetMyHandle().promise().DetachedSelf = self.GetMyHandle().promise().Self.lock();
+            } else {
+                self.GetMyHandle().promise().DetachedSelf.reset();
             }
             return self;
         }
@@ -622,6 +621,7 @@ namespace EasyCoro {
         return wrapper.GetResult();
     }
 
+
     template<>
     void ExecutionContext::BlockOn(SimpleAwaitable<void> awaitable) {
         std::binary_semaphore semaphore(0);
@@ -643,15 +643,15 @@ namespace EasyCoro {
         wrapper.GetResult();
     }
 
-    auto PromiseType<void>::get_return_object() -> SimpleAwaitable<void> {
+    SimpleAwaitable<void> PromiseType<void>::get_return_object() {
         ++g_AllocCount;
-        return MakeAwaitableFromPromise<void>(std::coroutine_handle<PromiseType>::from_promise(*this));
+        return SimpleAwaitable(std::coroutine_handle<PromiseType>::from_promise(*this));
     }
 
     template<typename Ret>
-    SimpleAwaitable<Ret> MakeAwaitableFromPromise(
-        auto &&handle) {
-        return SimpleAwaitable<Ret>{handle};
+    SimpleAwaitable<Ret> PromiseType<Ret>::get_return_object() {
+        ++g_AllocCount;
+        return SimpleAwaitable<Ret>(std::coroutine_handle<PromiseType>::from_promise(*this));
     }
 
     template<typename Promise> requires std::is_base_of_v<PromiseBase, Promise>
@@ -692,20 +692,19 @@ namespace EasyCoro {
         }
     };
 
-    export template<typename... Awaitables>
-    SimpleAwaitable<std::tuple<typename Awaitables::ReturnType...>> AllOf(Awaitables... awaitables) {
-        Finally finally([&] {
-            (awaitables.Reset(), ...);
-        });
-
+    export template<typename... Tps>
+    SimpleAwaitable<std::tuple<typename SimpleAwaitable<Tps>::ReturnType...>>
+    AllOf(SimpleAwaitable<Tps>... awaitables) {
         auto parentHandle = HandleToPointerCast(co_await AwaitToGetThisHandle{}).lock();
+
+        std::atomic_size_t remaining = sizeof...(awaitables);
+        std::binary_semaphore semaphore(0);
 
         std::shared_ptr<std::function<void()>> onChildSuspend = std::make_shared<std::function<
             void()>>(
-
-            [remaining = std::make_shared<std::atomic_size_t>(sizeof...(Awaitables)), parentHandle
-            ]() mutable {
-                if (auto thisRemaining = --*remaining; thisRemaining == 0) {
+            [&remaining, parentHandle, &semaphore]() mutable {
+                if (auto thisRemaining = --remaining; thisRemaining == 0) {
+                    semaphore.acquire();
                     GetCurrentExecutionContext().Schedule(std::exchange(parentHandle, nullptr));
                 }
             }
@@ -718,45 +717,43 @@ namespace EasyCoro {
         AwaitToDo awaiter([&] {
             (GetCurrentExecutionContext().Schedule(
                 awaitables.GetHandlePtr()), ...);
+
+            semaphore.release(1);
         });
 
         co_await awaiter;
 
         auto result = std::make_tuple(std::move(awaitables.GetResult())...);
+
+        (awaitables.Reset(), ...);
+
         co_return result;
     }
 
-    export template<typename... Awaitables>
-    SimpleAwaitable<std::tuple<std::optional<typename Awaitables::ReturnType>...>> AnyOf(Awaitables... awaitables) {
-        Finally finally([&] {
-            (awaitables.Reset(), ...);
-        });
-
+    export template<typename... Tps>
+    SimpleAwaitable<std::tuple<std::optional<typename SimpleAwaitable<Tps>::ReturnType>...>> AnyOf(
+        SimpleAwaitable<Tps>... awaitables) {
         auto parentHandle = HandleToPointerCast(co_await AwaitToGetThisHandle{}).lock();
 
-        std::binary_semaphore startSemaphore(0);
+        std::atomic_bool invoked = false;
+        std::binary_semaphore semaphore(0);
 
         auto onChildSuspend = std::make_shared<std::function<
             void()>>(
-
-            [Invoked = std::make_shared<std::atomic_bool>(false), parentHandle, &startSemaphore
-            ]() mutable {
+            [&invoked, parentHandle, &semaphore] mutable {
                 bool expected = false;
-                if (Invoked->compare_exchange_strong(expected, true)) {
-                    startSemaphore.acquire();
-                    GetCurrentExecutionContext().Schedule(std::exchange(parentHandle, nullptr));
+                if (invoked.compare_exchange_strong(expected, true)) {
+                    semaphore.acquire();
+                    GetCurrentExecutionContext().Schedule(parentHandle);
                 }
             }
         );
 
-        ((awaitables.SetOnFinished([onChildSuspend]() mutable {
+        ((awaitables.SetOnFinished([onChildSuspend] mutable {
             (*onChildSuspend)();
         })), ...);
 
-
         AwaitToDo awaiter([&] {
-            // (GetCurrentExecutionContext().Schedule(
-            //     awaitables.GetHandlePtr()), ...);
             auto applier = [](auto &awaitable) {
                 auto &context = GetCurrentExecutionContext();
                 if (awaitable.IsCancellable()) {
@@ -768,12 +765,15 @@ namespace EasyCoro {
 
             (applier(awaitables), ...);
 
-            startSemaphore.release(1);
+            semaphore.release(1);
         });
 
         co_await awaiter;
 
         auto result = std::make_tuple(std::move(awaitables.TryGetResult())...);
+
+        (awaitables.Reset(), ...);
+
         co_return result;
     }
 

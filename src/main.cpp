@@ -126,7 +126,7 @@ int main() {
                                 co_return std::optional<size_t>{123};
                             }
                             co_return std::nullopt;
-                        }).UnwrapOrThrow()
+                        }).UnWrapOr(rand())
                         .Then([&](size_t value) -> EasyCoro::SimpleAwaitable<size_t> {
                             std::cout << std::format("Value from random coroutine: {}\n", value);
 
@@ -135,7 +135,7 @@ int main() {
 
                             // ++counter;
                             co_return value;
-                        }).Cancellable(false)
+                        }).Cancellable(true)
                     ).Then([](auto thing) -> EasyCoro::SimpleAwaitable<void> {
                         std::cout << std::format("Completed AnyOf {}\n", thing);
                         co_return;
