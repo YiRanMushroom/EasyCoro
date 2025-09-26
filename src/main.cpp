@@ -26,18 +26,18 @@ struct ReportDestructor {
 
 
 EasyCoro::SimpleAwaitable<size_t> Sleep(int time) {
+    std::cout << std::format("Sleeping for {} ms...\n", time);
     std::this_thread::sleep_for(std::chrono::milliseconds(time));
     co_return time;
 }
 
 EasyCoro::SimpleAwaitable<size_t> Sleep(int time, auto &&... rest) {
-    size_t result = co_await Sleep(time);
+    size_t result = 0;
     result += co_await Sleep(std::forward<decltype(rest)>(rest)...);
     co_return result;
 }
 
 EasyCoro::SimpleAwaitable<void> ReturnVoid() {
-    // ReportDestructor destructor{};
     co_await Sleep(0);
     co_return;
 }
@@ -107,7 +107,7 @@ int main() {
     std::atomic_size_t counter = 0;
     // Inner
     {
-        EasyCoro::ExecutionContext context(32);
+        EasyCoro::ExecutionContext context(64);
 
         std::string example1 = "Example string 1";
         std::string example2 = "Example string 2";
@@ -117,8 +117,8 @@ int main() {
             auto now = std::chrono::high_resolution_clock::now();
             for (int i = 0; i < 10000; ++i) {
                 context.BlockOn(
-                    // EasyCoro::AllOf(
-                        Sleep(0)/*, Sleep(0), Sleep(0), Sleep(0), Sleep(0),
+                    EasyCoro::AnyOf(
+                        Sleep(0, 0), Sleep(0), Sleep(0), Sleep(0), Sleep(0),
                         Sleep(0), Sleep(0), Sleep(0), Sleep(0, 0, 0, 0, 0, 0),
                         Sleep(0), Sleep(0), Sleep(0), Sleep(0), Sleep(0),
                         EasyCoro::Pull([] -> EasyCoro::SimpleAwaitable<std::optional<size_t>> {
@@ -128,18 +128,33 @@ int main() {
                             co_return std::nullopt;
                         }).UnWrapOr([] { return rand(); })
                         .Then([&](size_t value) -> EasyCoro::SimpleAwaitable<size_t> {
+                            static std::atomic_size_t localCounter = 0;
+                            ++localCounter;
+                            static EasyCoro::Finally report([&] {
+                                std::cout << std::format("Local counter: {}\n", localCounter.load());
+                            });
+
                             std::cout << std::format("Value from random coroutine: {}\n", value);
 
-                            co_await Sleep(0);
-                            co_await Sleep(0);
+                            co_await EasyCoro::Pull(EasyCoro::TryUntilHasValue([] {
+                                auto input = GetConsoleInput();
+                                if (input) {
+                                    std::cout << std::format("Received console input: {}\n", *input);
+                                }
+                                return input;
+                            }, std::chrono::milliseconds(1))).WithTimeOut(std::chrono::milliseconds(10));
+                            co_await EasyCoro::AsynchronousOf([](std::string str) {
+                                std::cout << std::format("Processing string asynchronously: {}\n", str);
+                                return str.size();
+                            })(example1);
 
                             // ++counter;
                             co_return value;
-                        }).Cancellable(true)
+                        }).Cancellable(false)
                     ).Then([](auto thing) -> EasyCoro::SimpleAwaitable<void> {
                         std::cout << std::format("Completed AnyOf {}\n", thing);
                         co_return;
-                    }*///)
+                    })
                 );
             }
             auto later = std::chrono::high_resolution_clock::now();
@@ -148,8 +163,6 @@ int main() {
         } catch (const std::exception &ex) {
             std::cerr << "Caught exception: " << ex.what() << std::endl;
         }
-
-        // context.Detach();
     }
 
     // report memory
@@ -159,8 +172,15 @@ int main() {
 
     // std::cout << "Counter: " << counter.load() << std::endl;
 
+    std::mutex mtx;
+
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    mtx.lock();
+
     std::cout << "Alloc count: " << EasyCoro::g_AllocCount.load() << std::endl;
     std::cout << "Dealloc count: " << EasyCoro::g_DeallocCount.load() << std::endl;
 
+    mtx.unlock();
     std::cout << "Main function completed." << std::endl;
 }

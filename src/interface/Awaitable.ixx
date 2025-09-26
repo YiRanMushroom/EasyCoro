@@ -9,7 +9,7 @@ namespace EasyCoro {
     export template<typename Ret>
     class SimpleAwaitable;
 
-    template<typename Fn>
+    export template<typename Fn>
     struct Finally {
         Fn func;
 
@@ -25,6 +25,10 @@ namespace EasyCoro {
         Fn func;
 
         AwaitToDo(Fn f) : func(std::move(f)) {}
+
+        void await_suspend(std::coroutine_handle<> handle) {
+            func(handle);
+        }
     };
 
     template<typename Fn>
@@ -68,6 +72,7 @@ namespace EasyCoro {
     };
 
     void ExecutionContext::Schedule(std::shared_ptr<void> handle) {
+        // std::cout << std::format("Scheduling {}\n", (void *) handle.get()) << std::flush;
         m_ThreadPool->Enqueue([weak = std::weak_ptr(handle)] {
             // std::this_thread::sleep_for(std::chrono::milliseconds(100));
             if (auto shared = weak.lock()) {
@@ -92,6 +97,7 @@ namespace EasyCoro {
         std::weak_ptr<void> Self{};
         std::atomic_bool IsCancelled = false;
         std::atomic_bool NotCancellable = false;
+        // std::atomic_bool InitialSuspended = true;
         std::function<void()> OnFinished = nullptr;
         ExecutionContext *Context = nullptr;
 
@@ -136,8 +142,8 @@ namespace EasyCoro {
 
         SimpleAwaitable<Ret> get_return_object();
 
-        static std::suspend_never initial_suspend() noexcept {
-            return {};
+        auto initial_suspend() noexcept {
+            return std::suspend_always{};
         }
 
         static std::suspend_always final_suspend() noexcept {
@@ -173,7 +179,9 @@ namespace EasyCoro {
 
         SimpleAwaitable<void> get_return_object();
 
-        std::suspend_never initial_suspend() { return {}; }
+        auto initial_suspend() {
+            return std::suspend_always{};
+        }
 
         constexpr static std::suspend_always final_suspend() noexcept { return {}; }
 
@@ -193,24 +201,6 @@ namespace EasyCoro {
 
         void unhandled_exception();
     };
-
-
-    struct AwaitToGetThisHandle {
-        std::coroutine_handle<> parentHandle;
-
-        bool await_ready() const noexcept { return false; }
-
-        void await_suspend(std::coroutine_handle<> handle) {
-            parentHandle = handle;
-            // GetCurrentExecutionContext().Schedule(HandleToPointerCast<void>(handle).lock());
-            HandleReinterpretCast<PromiseBase>(handle).promise().Schedule();
-        }
-
-        std::coroutine_handle<> await_resume() const noexcept {
-            return parentHandle;
-        }
-    };
-
 
     SimpleAwaitable<void> Sleep(auto duration);
 
@@ -249,8 +239,6 @@ namespace EasyCoro {
             return false;
         }
 
-        void await_suspend(std::coroutine_handle<> parentHandle) {}
-
         [[nodiscard]] ExecutionContext *GetContext() const;
 
         void Cancel() {
@@ -274,6 +262,10 @@ namespace EasyCoro {
 
         void await_resume();
 
+        void await_suspend(std::coroutine_handle<> parentHandle) {
+            GetMyHandle().promise().Schedule();
+        }
+
         bool IsCancelled() const {
             return GetMyHandle().promise().IsCancelled;
         }
@@ -287,6 +279,8 @@ namespace EasyCoro {
 
         template<typename Duration = std::chrono::milliseconds>
         inline auto WithTimeOut(this SimpleAwaitable self, Duration duration) -> SimpleAwaitable;
+
+        // SimpleAwaitable CaptureEnabled(this SimpleAwaitable self);
     };
 
     template<typename Ret>
@@ -348,7 +342,9 @@ namespace EasyCoro {
             return false;
         }
 
-        void await_suspend(std::coroutine_handle<> parentHandle) {}
+        void await_suspend(std::coroutine_handle<> parentHandle) {
+            GetMyHandle().promise().Schedule();
+        }
 
         ExecutionContext *GetContext() const {
             return GetMyHandle().promise().Context;
@@ -385,36 +381,27 @@ namespace EasyCoro {
 
         template<typename Duration = std::chrono::milliseconds>
         auto WithTimeOut(this SimpleAwaitable self, Duration duration) -> SimpleAwaitable<std::optional<Ret>>;
+
+        // SimpleAwaitable CaptureEnabled(this SimpleAwaitable self);
     };
 
     template<typename Ret>
     Ret ExecutionContext::BlockOn(SimpleAwaitable<Ret> awaitable) {
         std::binary_semaphore semaphore(0);
-        auto wrapper = [&awaitable, this, &semaphore]() mutable -> SimpleAwaitable<Ret> {
-            auto &copied = awaitable;
-            auto copiedThis = this;
-            auto &innerSemaphore = semaphore;
-            co_await AwaitToDoImmediate{
-                [copiedThis, &innerSemaphore](std::coroutine_handle<> handle) {
-                    auto myHandle = HandleReinterpretCast<PromiseBase>(handle);
-                    myHandle.promise().Context = copiedThis;
-                    myHandle.promise().OnFinished = [&innerSemaphore] {
-                        innerSemaphore.release();
-                    };
-                }
-            };
-
-            std::cout << "Blocking on awaitable...\n" << std::flush;
-            auto result = co_await copied;
-            std::cout << "Awaitable completed.\n";
+        auto wrapper = [](SimpleAwaitable<Ret> &awaitable) mutable -> SimpleAwaitable<Ret> {
+            auto copied = awaitable; // Make a copy to avoid dangling reference
+            auto result = co_await std::move(copied);
             co_return result;
-        }();
+        }(awaitable);
+
+        wrapper.SetContext(this);
+        wrapper.SetOnFinished([&semaphore] {
+            semaphore.release();
+        });
 
         auto handlePtr = wrapper.GetHandlePtr();
 
-        std::cout << "Scheduling wrapper coroutine...\n" << std::flush;
         wrapper.GetMyHandle().promise().Schedule();
-        std::cout << "Waiting for wrapper coroutine to complete...\n" << std::flush;
 
         semaphore.acquire();
 
@@ -425,24 +412,15 @@ namespace EasyCoro {
     template<>
     void ExecutionContext::BlockOn(SimpleAwaitable<void> awaitable) {
         std::binary_semaphore semaphore(0);
-        auto wrapper = [&awaitable, this, &semaphore] mutable -> SimpleAwaitable<void> {
-            auto &copied = awaitable;
-            auto copiedThis = this;
-            auto &innerSemaphore = semaphore;
-
-            co_await AwaitToDoImmediate{
-                [copiedThis, &innerSemaphore](std::coroutine_handle<> handle) {
-                    auto myHandle = HandleReinterpretCast<PromiseBase>(handle);
-                    myHandle.promise().Context = copiedThis;
-                    myHandle.promise().OnFinished = [&innerSemaphore] {
-                        innerSemaphore.release();
-                    };
-                }
-            };
-
-            co_await copied;
+        auto wrapper = [](SimpleAwaitable<void> &awaitable)mutable -> SimpleAwaitable<void> {
+            co_await awaitable;
             co_return;
-        }();
+        }(awaitable);
+
+        wrapper.SetContext(this);
+        wrapper.SetOnFinished([&semaphore] {
+            semaphore.release();
+        });
 
         auto handlePtr = wrapper.GetHandlePtr();
 
@@ -657,11 +635,17 @@ namespace EasyCoro {
         return std::nullopt;
     }
 
-
     export template<typename... Tps>
     SimpleAwaitable<std::tuple<typename SimpleAwaitable<Tps>::ReturnType...>>
     AllOf(SimpleAwaitable<Tps>... awaitables) {
-        auto parentHandle = HandleToPointerCast(co_await AwaitToGetThisHandle{}).lock();
+        std::shared_ptr<void> parentHandle{};
+        co_await AwaitToDoImmediate{
+            [&parentHandle](std::coroutine_handle<> handle) {
+                parentHandle = HandleToPointerCast(handle).lock();
+            }
+        };
+
+        // std::cout << std::format("My handle is {}\n", (void *) parentHandle.get()) << std::flush;
 
         std::atomic_size_t remaining = sizeof...(awaitables);
         std::binary_semaphore semaphore(0);
@@ -672,6 +656,7 @@ namespace EasyCoro {
                 if (auto thisRemaining = --remaining; thisRemaining == 0) {
                     semaphore.acquire();
                     // GetCurrentExecutionContext().Schedule(std::exchange(parentHandle, nullptr));
+                    // std::cout << std::format("Resuming {}", (void *) parentHandle.get()) << std::endl;
                     PointerToHandleCast<PromiseBase>(std::exchange(parentHandle, nullptr)).promise().Schedule();
                 }
             }
@@ -684,9 +669,7 @@ namespace EasyCoro {
         ExecutionContext *context = PointerToHandleCast<PromiseBase>(parentHandle).promise().Context;
         ((awaitables.SetContext(context)), ...);
 
-        AwaitToDo awaiter([&] {
-            // (GetCurrentExecutionContext().Schedule(
-            //     awaitables.GetHandlePtr()), ...);
+        AwaitToDo awaiter([&](std::coroutine_handle<>) {
             (awaitables.GetMyHandle().promise().Schedule(), ...);
 
             semaphore.release(1);
@@ -704,7 +687,13 @@ namespace EasyCoro {
     export template<typename... Tps>
     SimpleAwaitable<std::tuple<std::optional<typename SimpleAwaitable<Tps>::ReturnType>...>> AnyOf(
         SimpleAwaitable<Tps>... awaitables) {
-        auto parentHandle = HandleToPointerCast(co_await AwaitToGetThisHandle{}).lock();
+        std::shared_ptr<void> parentHandle{};
+
+        co_await AwaitToDoImmediate{
+            [&parentHandle](std::coroutine_handle<> handle) {
+                parentHandle = HandleToPointerCast(handle).lock();
+            }
+        };
 
         std::atomic_bool invoked = false;
         std::binary_semaphore semaphore(0);
@@ -727,7 +716,7 @@ namespace EasyCoro {
         ExecutionContext *context = PointerToHandleCast<PromiseBase>(parentHandle).promise().Context;
         ((awaitables.SetContext(context)), ...);
 
-        AwaitToDo awaiter([&] {
+        AwaitToDo awaiter([&](std::coroutine_handle<>) {
             auto applier = [](auto &awaitable) {
                 if (awaitable.IsCancellable()) {
                     awaitable.GetMyHandle().promise().Schedule();
@@ -759,8 +748,10 @@ namespace EasyCoro {
     export template<typename Func>
     auto AsynchronousOf(Func func) {
         return [func]<typename... Args>(
-            Args &&... args) -> SimpleAwaitable<decltype(func(args...))> {
-            co_return func(std::forward<Args>(args)...);
+            Args &&... args) mutable -> SimpleAwaitable<decltype(func(args...))>  {
+            return [](Func func, Args &&... innerArgs) -> SimpleAwaitable<decltype(func(innerArgs...))> {
+                co_return func(std::forward<Args>(innerArgs)...);
+            }(std::move(func), std::forward<Args>(args)...);
         };
     }
 
@@ -802,7 +793,6 @@ namespace EasyCoro {
         AwaitToDo awaiter([](std::coroutine_handle<> thisHandle) {
             auto myHandle = HandleReinterpretCast<PromiseType<Ret>>(thisHandle);
             myHandle.promise().Cancel();
-            // GetCurrentExecutionContext().Schedule(HandleToPointerCast<void>(thisHandle).lock());
             HandleReinterpretCast<PromiseBase>(thisHandle).promise().Schedule();
         });
 
@@ -976,21 +966,22 @@ namespace EasyCoro {
 
     export template<typename Func>
     auto TryUntilHasValue(Func func, std::chrono::milliseconds timeInterval = std::chrono::milliseconds(0)) {
-        return [capturedFunc = std::move(func), capturedInterval = timeInterval]<typename... Args>(
+        return [func = std::move(func), timeInterval]<typename... Args>(
             Args &&... args) mutable -> SimpleAwaitable<typename decltype(func(args...))::value_type> {
-            auto func = std::move(capturedFunc);
-            auto timeInterval = std::move(capturedInterval);
-            while (true) {
-                auto value = co_await [](
-                    Func &func, Args &&... innerArgs) -> SimpleAwaitable<decltype(func(innerArgs...))> {
-                            co_return func(std::forward<Args>(innerArgs)...);
-                        }(func, std::forward<Args>(args)...);
-                if (value) {
-                    co_return value.value();
-                }
-                if (timeInterval.count() > 0)
-                    std::this_thread::sleep_for(timeInterval);
-            }
+            return [](Func func, std::chrono::milliseconds timeInterval, Args &&... args) mutable
+                -> SimpleAwaitable<typename decltype(func(args...))::value_type> {
+                        while (true) {
+                            auto value = co_await [](
+                                Func &func, Args &&... innerArgs) -> SimpleAwaitable<decltype(func(innerArgs...))> {
+                                        co_return func(std::forward<Args>(innerArgs)...);
+                                    }(func, std::forward<Args>(args)...);
+                            if (value) {
+                                co_return value.value();
+                            }
+                            if (timeInterval.count() > 0)
+                                std::this_thread::sleep_for(timeInterval);
+                        }
+                    }(std::move(func), timeInterval, std::forward<Args>(args)...);
         };
     }
 
