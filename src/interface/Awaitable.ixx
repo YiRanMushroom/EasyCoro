@@ -6,6 +6,9 @@ import <cassert>;
 import <cstddef>;
 
 namespace EasyCoro {
+    export template<typename Ret>
+    class SimpleAwaitable;
+
     template<typename Fn>
     struct Finally {
         Fn func;
@@ -78,7 +81,8 @@ namespace EasyCoro {
             m_ThreadPool->WaitAllTaskToFinish();
         }
 
-        auto BlockOn(auto awaitable);
+        template<typename Ret>
+        Ret BlockOn(SimpleAwaitable<Ret> awaitable);
 
         void Detach() {
             m_ThreadPool->DetachAll();
@@ -96,9 +100,6 @@ namespace EasyCoro {
         return *CurrentExecutionContext;
     }
 
-
-    export template<typename Ret>
-    class SimpleAwaitable;
 
     template<typename Ret>
     SimpleAwaitable<Ret> MakeAwaitableFromPromise(
@@ -158,6 +159,9 @@ namespace EasyCoro {
             {
                 std::scoped_lock lock(ResultProtectMutex);
                 Result = std::current_exception();
+                if (OnFinished) {
+                    OnFinished();
+                }
             }
             DetachedSelf.reset();
         }
@@ -172,7 +176,7 @@ namespace EasyCoro {
             IsCancelled = true;
         }
 
-        auto get_return_object();
+        SimpleAwaitable<void> get_return_object();
 
         std::suspend_always initial_suspend() {
             return {};
@@ -196,6 +200,9 @@ namespace EasyCoro {
             {
                 std::scoped_lock lock(ResultProtectMutex);
                 Result = std::current_exception();
+                if (OnFinished) {
+                    OnFinished();
+                }
             }
             DetachedSelf.reset();
         }
@@ -342,6 +349,9 @@ namespace EasyCoro {
         std::optional<Unit> TryGetResult() {
             if (std::holds_alternative<std::monostate>(GetMyHandle().promise().Result)) {
                 return Unit{};
+            }
+            if (std::holds_alternative<std::exception_ptr>(GetMyHandle().promise().Result)) {
+                std::rethrow_exception(std::get<std::exception_ptr>(GetMyHandle().promise().Result));
             }
             return std::nullopt;
         }
@@ -570,6 +580,9 @@ namespace EasyCoro {
             if (std::holds_alternative<Ret>(GetMyHandle().promise().Result)) {
                 return std::get<Ret>(std::move(GetMyHandle().promise().Result));
             }
+            if (std::holds_alternative<std::exception_ptr>(GetMyHandle().promise().Result)) {
+                std::rethrow_exception(std::get<std::exception_ptr>(GetMyHandle().promise().Result));
+            }
             return std::nullopt;
         }
 
@@ -588,32 +601,49 @@ namespace EasyCoro {
     };
 
 
-    auto ExecutionContext::BlockOn(auto awaitable) {
+    template<typename Ret>
+    Ret ExecutionContext::BlockOn(SimpleAwaitable<Ret> awaitable) {
         std::binary_semaphore semaphore(0);
-        auto wrapper = [awaitable = std::move(awaitable), &semaphore
-                ]() mutable -> SimpleAwaitable<decltype(awaitable.GetResult())> {
+        auto wrapper = [&awaitable
+                ] mutable -> SimpleAwaitable<Ret> {
                     auto result = co_await awaitable;
-                    Finally finally([&] { semaphore.release(1); });
-                    // Protect
                     co_return result;
                 }();
+
+        wrapper.SetOnFinished([&semaphore] {
+            semaphore.release();
+        });
+
         auto handlePtr = wrapper.GetHandlePtr();
-        auto handle = wrapper.GetHandle();
         Schedule(handlePtr);
 
-        // Wait
-        {
-            semaphore.acquire();
-            while (true) {
-                if (handle.done())
-                    break;
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-        }
+        semaphore.acquire();
+
         return wrapper.GetResult();
     }
 
-    auto PromiseType<void>::get_return_object() {
+    template<>
+    void ExecutionContext::BlockOn(SimpleAwaitable<void> awaitable) {
+        std::binary_semaphore semaphore(0);
+        auto wrapper = [&awaitable
+                ] mutable -> SimpleAwaitable<void> {
+                    co_await awaitable;
+                    co_return;
+                }();
+
+        wrapper.SetOnFinished([&semaphore] {
+            semaphore.release();
+        });
+
+        auto handlePtr = wrapper.GetHandlePtr();
+        Schedule(handlePtr);
+
+        semaphore.acquire();
+
+        wrapper.GetResult();
+    }
+
+    auto PromiseType<void>::get_return_object() -> SimpleAwaitable<void> {
         ++g_AllocCount;
         return MakeAwaitableFromPromise<void>(std::coroutine_handle<PromiseType>::from_promise(*this));
     }

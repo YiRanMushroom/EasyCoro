@@ -79,6 +79,30 @@ std::atomic_size_t g_AllocCount = 0;
 
 EasyCoro::SimpleAwaitable<size_t> (*SleepPtr)(int) = Sleep;
 
+// specialize formatter<std::option<T>>
+template<typename T>
+struct std::formatter<std::optional<T>> : std::formatter<T> {
+    constexpr auto parse(auto &ctx) const { return ctx.begin(); }
+
+    auto format(const std::optional<T> &opt, auto &ctx) const {
+        if (opt.has_value()) {
+            return std::formatter<T>::format(opt.value(), ctx);
+        } else {
+            return std::format_to(ctx.out(), "nullopt");
+        }
+    }
+};
+
+// specialize formatter<Unit>
+template<>
+struct std::formatter<EasyCoro::Unit> {
+    constexpr auto parse(auto &ctx) const { return ctx.begin(); }
+
+    auto format(const EasyCoro::Unit &, auto &ctx) const {
+        return std::format_to(ctx.out(), "Unit");
+    }
+};
+
 int main() {
     std::atomic_size_t counter = 0;
     // Inner
@@ -97,23 +121,25 @@ int main() {
                         Sleep(0), Sleep(0), Sleep(0), Sleep(0), Sleep(0),
                         Sleep(0), Sleep(0), Sleep(0), Sleep(0, 0, 0, 0, 0, 0),
                         Sleep(0), Sleep(0), Sleep(0), Sleep(0), Sleep(0),
-                        EasyCoro::Pull([]() -> EasyCoro::SimpleAwaitable<std::optional<size_t>> {
-                            // std::cout << "Random coroutine\n";
+                        EasyCoro::Pull([] -> EasyCoro::SimpleAwaitable<std::optional<size_t>> {
                             if (rand() % 2 == 0) {
                                 co_return std::optional<size_t>{123};
                             }
                             co_return std::nullopt;
-                        }).UnWrapOr(0)
-                        .Then([&](size_t value) -> EasyCoro::SimpleAwaitable<void> {
+                        }).UnwrapOrThrow()
+                        .Then([&](size_t value) -> EasyCoro::SimpleAwaitable<size_t> {
                             std::cout << std::format("Value from random coroutine: {}\n", value);
 
                             co_await Sleep(0);
                             co_await Sleep(0);
 
                             // ++counter;
-                            co_return;
+                            co_return value;
                         }).Cancellable(false)
-                    )
+                    ).Then([](auto thing) -> EasyCoro::SimpleAwaitable<void> {
+                        std::cout << std::format("Completed AnyOf {}\n", thing);
+                        co_return;
+                    })
                 );
             }
             auto later = std::chrono::high_resolution_clock::now();
