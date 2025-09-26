@@ -23,8 +23,12 @@ namespace EasyCoro {
 
         AwaitToDo(Fn f) : func(std::move(f)) {}
 
-        void await_suspend(std::coroutine_handle<>) {
-            func();
+        void await_suspend(std::coroutine_handle<> handle) {
+            if constexpr (std::is_invocable_v<Fn>) {
+                func();
+            } else {
+                func(handle);
+            }
         }
     };
 
@@ -55,6 +59,17 @@ namespace EasyCoro {
                     if (!coroHandle.done()) {
                         coroHandle.resume();
                     }
+                }
+            });
+        }
+
+        // Not used. scheduler should never hold strong reference to coroutine, because we don't know the state of it,
+        // and we don't know when to drop it.
+        void ScheduleStrong(std::shared_ptr<void> handle) {
+            m_ThreadPool->Enqueue([handle = std::move(handle)] {
+                std::coroutine_handle<> coroHandle = std::coroutine_handle<>::from_address(handle.get());
+                if (!coroHandle.done()) {
+                    coroHandle.resume();
                 }
             });
         }
@@ -91,10 +106,12 @@ namespace EasyCoro {
     );
 
     struct PromiseBase {
-        std::weak_ptr<void> Self;
-
+        std::weak_ptr<void> Self{};
         std::atomic_bool IsCancelled = false;
+        std::atomic_bool NotCancellable = false;
         std::function<void()> OnFinished = nullptr;
+
+        std::optional<std::shared_ptr<void>> DetachedSelf = std::nullopt;
     };
 
     template<typename Ret>
@@ -111,8 +128,11 @@ namespace EasyCoro {
             return MakeAwaitableFromPromise<Ret>(std::coroutine_handle<PromiseType>::from_promise(*this));
         }
 
-        constexpr static std::suspend_always initial_suspend() { return {}; }
-        constexpr static std::suspend_always final_suspend() noexcept { return {}; }
+        std::suspend_always initial_suspend() {
+            return {};
+        }
+
+        std::suspend_always final_suspend() noexcept { return {}; }
 
         void return_value(Ret value) {
             // Protect
@@ -123,17 +143,23 @@ namespace EasyCoro {
                     OnFinished();
                 }
             }
+            DetachedSelf.reset();
         }
 
         void return_value(Unit) {
             if (!IsCancelled) {
                 throw std::runtime_error("Cannot return void from non-void coroutine which is not canceled");
             }
+            DetachedSelf.reset();
         }
 
         void unhandled_exception() {
-            std::scoped_lock lock(ResultProtectMutex);
-            Result = std::current_exception();
+            // Protect
+            {
+                std::scoped_lock lock(ResultProtectMutex);
+                Result = std::current_exception();
+            }
+            DetachedSelf.reset();
         }
     };
 
@@ -148,7 +174,10 @@ namespace EasyCoro {
 
         auto get_return_object();
 
-        constexpr static std::suspend_always initial_suspend() { return {}; }
+        std::suspend_always initial_suspend() {
+            return {};
+        }
+
         constexpr static std::suspend_always final_suspend() noexcept { return {}; }
 
         void return_void() {
@@ -159,16 +188,21 @@ namespace EasyCoro {
                 if (OnFinished)
                     OnFinished();
             }
+            DetachedSelf.reset();
         }
 
         void unhandled_exception() {
-            std::scoped_lock lock(ResultProtectMutex);
-            Result = std::current_exception();
+            // Protect
+            {
+                std::scoped_lock lock(ResultProtectMutex);
+                Result = std::current_exception();
+            }
+            DetachedSelf.reset();
         }
     };
 
 
-    template<typename Promise> requires std::is_base_of_v<PromiseBase, Promise>
+    template<typename Promise = PromiseBase> requires std::is_base_of_v<PromiseBase, Promise>
     auto PointerToHandleCast(
         const std::shared_ptr<void> &ptr) -> std::coroutine_handle<Promise>;
 
@@ -176,9 +210,10 @@ namespace EasyCoro {
     const std::weak_ptr<void> &HandleToPointerCast(
         std::coroutine_handle<T> handle);
 
+    template<typename Promise = PromiseBase> requires std::is_base_of_v<PromiseBase, Promise>
     auto
     HandleReinterpretCast(
-        std::coroutine_handle<> handle) -> std::coroutine_handle<PromiseBase>;
+        std::coroutine_handle<> handle) -> std::coroutine_handle<Promise>;
 
 
     SimpleAwaitable<void> Sleep(auto duration);
@@ -233,21 +268,44 @@ namespace EasyCoro {
             if (auto self = GetMyHandle().promise().Self.lock()) {
                 if (!GetMyHandle().promise().OnFinished) {
                     std::lock_guard lock(GetMyHandle().promise().ResultProtectMutex);
-                    GetMyHandle().promise().OnFinished = [
-                                parentHandle = HandleToPointerCast<void>(parentHandle)
-                            ]() mutable {
-                                if (auto copied = parentHandle.lock()) {
-                                    parentHandle.reset();
-                                    GetCurrentExecutionContext().Schedule(copied);
-                                }
-                            };
+
+                    auto parent = HandleReinterpretCast<PromiseBase>(parentHandle);
+                    if (parent.promise().NotCancellable) {
+                        GetMyHandle().promise().OnFinished = [
+                                    strongParent = HandleToPointerCast(parentHandle).lock()
+                                ] mutable {
+                                    GetCurrentExecutionContext().Schedule(std::exchange(strongParent, nullptr));
+                                };
+                    } else {
+                        GetMyHandle().promise().OnFinished = [
+                            parentHandle = HandleToPointerCast<void>(parentHandle)
+                        ] {
+                            if (auto copied = parentHandle.lock()) {
+                                GetCurrentExecutionContext().Schedule(copied);
+                            }
+                        };
+                    }
                 }
                 GetCurrentExecutionContext().Schedule(self);
+            } else {
+                __debugbreak();
             }
         }
 
         void Cancel() {
             GetMyHandle().promise().Cancel();
+        }
+
+        SimpleAwaitable Cancellable(this SimpleAwaitable self, bool value) {
+            self.GetMyHandle().promise().NotCancellable = !value;
+            if (value == false) {
+                self.GetMyHandle().promise().DetachedSelf = self.GetMyHandle().promise().Self.lock();
+            }
+            return self;
+        }
+
+        bool IsCancellable() const {
+            return !GetMyHandle().promise().NotCancellable;
         }
 
         void SetOnFinished(auto &&callback) {
@@ -316,7 +374,15 @@ namespace EasyCoro {
             if (value) {
                 co_return *value;
             }
-            self.Cancel();
+
+            AwaitToDo awaiter([](std::coroutine_handle<> thisHandle) {
+                auto myHandle = HandleReinterpretCast<PromiseType<Ret>>(thisHandle);
+                myHandle.promise().Cancel();
+                GetCurrentExecutionContext().Schedule(HandleToPointerCast<void>(thisHandle).lock());
+            });
+
+            co_await awaiter;
+
             co_return Unit{};
         }
 
@@ -325,18 +391,19 @@ namespace EasyCoro {
             if (value) {
                 co_return *value;
             }
-            if constexpr (std::is_same_v<std::invoke_result_t<decltype(provider)>, typename Ret::value_type>) {
+
+            if constexpr (std::convertible_to<decltype(provider), typename Ret::value_type>) {
+                co_return static_cast<Ret::value_type>(provider);
+            } else if constexpr (std::is_same_v<std::invoke_result_t<decltype(provider)>, typename Ret::value_type>) {
                 co_return provider();
-            } else if constexpr (std::is_same_v<std::invoke_result_t<decltype(provider)>, SimpleAwaitable<typename
-                Ret::value_type>>) {
+            } else if constexpr (std::is_same_v<std::invoke_result_t<decltype(provider)>,
+                SimpleAwaitable<typename Ret::value_type>>) {
                 co_return co_await provider();
-            }
-            if constexpr (std::is_same_v<decltype(provider), typename Ret::value_type>) {
-                co_return provider;
             } else {
-                static_assert([] { return false; }(),
-                              "Provider must be a callable returning the value type or an awaitable of the value type, or the value type itself.")
-                        ;
+                static_assert(
+                    [] { return false; }(),
+                    "Provider must be a callable returning the value type or an awaitable of the value type, "
+                    "or the value type itself.");
             }
         }
 
@@ -413,22 +480,47 @@ namespace EasyCoro {
         }
 
         void await_suspend(std::coroutine_handle<> parentHandle) {
-            if (!GetMyHandle().promise().OnFinished) {
-                std::lock_guard lock(GetMyHandle().promise().ResultProtectMutex);
-                GetMyHandle().promise().OnFinished = [
+            if (auto self = GetMyHandle().promise().Self.lock()) {
+                if (!GetMyHandle().promise().OnFinished) {
+                    std::lock_guard lock(GetMyHandle().promise().ResultProtectMutex);
+
+                    auto parent = HandleReinterpretCast<PromiseBase>(parentHandle);
+                    if (parent.promise().NotCancellable) {
+                        GetMyHandle().promise().OnFinished = [
+                                    strongParent = HandleToPointerCast(parentHandle).lock()
+                                ] mutable {
+                                    GetCurrentExecutionContext().Schedule(std::exchange(strongParent, nullptr));
+                                };
+                    } else {
+                        GetMyHandle().promise().OnFinished = [
                             parentHandle = HandleToPointerCast<void>(parentHandle)
-                        ]() mutable {
+                        ] {
                             if (auto copied = parentHandle.lock()) {
-                                parentHandle.reset();
                                 GetCurrentExecutionContext().Schedule(copied);
                             }
                         };
+                    }
+                }
+                GetCurrentExecutionContext().Schedule(self);
+            } else {
+                __debugbreak();
             }
-            GetCurrentExecutionContext().Schedule(GetHandlePtr());
         }
 
         void Cancel() {
             GetMyHandle().promise().Cancel();
+        }
+
+        SimpleAwaitable Cancellable(this SimpleAwaitable self, bool value) {
+            self.GetMyHandle().promise().NotCancellable = !value;
+            if (value == false) {
+                self.GetMyHandle().promise().DetachedSelf = self.GetMyHandle().promise().Self.lock();
+            }
+            return self;
+        }
+
+        bool IsCancellable() const {
+            return !GetMyHandle().promise().NotCancellable;
         }
 
         void SetOnFinished(auto &&callback) {
@@ -547,10 +639,11 @@ namespace EasyCoro {
         return HandleReinterpretCast(handle).promise().Self;
     }
 
+    template<typename Promise> requires std::is_base_of_v<PromiseBase, Promise>
     auto HandleReinterpretCast(
-        std::coroutine_handle<> handle) -> std::coroutine_handle<PromiseBase> {
+        std::coroutine_handle<> handle) -> std::coroutine_handle<Promise> {
         assert(handle);
-        return std::coroutine_handle<PromiseBase>::from_address(
+        return std::coroutine_handle<Promise>::from_address(
             handle.address());
     }
 
@@ -632,8 +725,19 @@ namespace EasyCoro {
 
 
         AwaitToDo awaiter([&] {
-            (GetCurrentExecutionContext().Schedule(
-                awaitables.GetHandlePtr()), ...);
+            // (GetCurrentExecutionContext().Schedule(
+            //     awaitables.GetHandlePtr()), ...);
+            auto applier = [](auto &awaitable) {
+                auto &context = GetCurrentExecutionContext();
+                if (awaitable.IsCancellable()) {
+                    context.Schedule(awaitable.GetHandlePtr());
+                } else {
+                    context.Schedule(awaitable.GetHandlePtr());
+                }
+            };
+
+            (applier(awaitables), ...);
+
             startSemaphore.release(1);
         });
 
