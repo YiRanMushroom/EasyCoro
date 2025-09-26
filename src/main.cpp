@@ -117,16 +117,16 @@ int main() {
             auto now = std::chrono::high_resolution_clock::now();
             for (int i = 0; i < 10000; ++i) {
                 context.BlockOn(
-                    EasyCoro::AnyOf(
-                        Sleep(0), Sleep(0), Sleep(0), Sleep(0), Sleep(0),
+                    // EasyCoro::AllOf(
+                        Sleep(0)/*, Sleep(0), Sleep(0), Sleep(0), Sleep(0),
                         Sleep(0), Sleep(0), Sleep(0), Sleep(0, 0, 0, 0, 0, 0),
                         Sleep(0), Sleep(0), Sleep(0), Sleep(0), Sleep(0),
                         EasyCoro::Pull([] -> EasyCoro::SimpleAwaitable<std::optional<size_t>> {
                             if (rand() % 2 == 0) {
-                                co_return std::optional<size_t>{123};
+                                co_return std::nullopt;
                             }
                             co_return std::nullopt;
-                        }).UnWrapOr(rand())
+                        }).UnWrapOr([] { return rand(); })
                         .Then([&](size_t value) -> EasyCoro::SimpleAwaitable<size_t> {
                             std::cout << std::format("Value from random coroutine: {}\n", value);
 
@@ -139,7 +139,7 @@ int main() {
                     ).Then([](auto thing) -> EasyCoro::SimpleAwaitable<void> {
                         std::cout << std::format("Completed AnyOf {}\n", thing);
                         co_return;
-                    })
+                    }*///)
                 );
             }
             auto later = std::chrono::high_resolution_clock::now();

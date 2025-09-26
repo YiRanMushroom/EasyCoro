@@ -25,14 +25,13 @@ namespace EasyCoro {
         Fn func;
 
         AwaitToDo(Fn f) : func(std::move(f)) {}
+    };
 
-        void await_suspend(std::coroutine_handle<> handle) {
-            if constexpr (std::is_invocable_v<Fn>) {
-                func();
-            } else {
-                func(handle);
-            }
-        }
+    template<typename Fn>
+    struct AwaitToDoImmediate : std::suspend_never {
+        Fn func;
+
+        AwaitToDoImmediate(Fn f) : func(std::move(f)) {}
     };
 
     export struct Unit {};
@@ -57,6 +56,7 @@ namespace EasyCoro {
 
         void Schedule(std::shared_ptr<void> handle) {
             m_ThreadPool->Enqueue([weak = std::weak_ptr(handle)] {
+                // std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 if (auto shared = weak.lock()) {
                     std::coroutine_handle<> coroHandle = std::coroutine_handle<>::from_address(shared.get());
                     if (!coroHandle.done()) {
@@ -98,12 +98,26 @@ namespace EasyCoro {
                 if (Context) {
                     Context->Schedule(self);
                 } else {
+                    std::cout << "No execution context set in coroutine promise\n" << std::flush;
                     __debugbreak();
                     throw std::runtime_error("No execution context set in coroutine promise");
                 }
             }
         }
     };
+
+    template<typename Promise = PromiseBase> requires std::is_base_of_v<PromiseBase, Promise>
+    auto PointerToHandleCast(
+        std::shared_ptr<void> ptr) -> std::coroutine_handle<Promise>;
+
+    template<typename T>
+    const std::weak_ptr<void> &HandleToPointerCast(
+        std::coroutine_handle<T> handle);
+
+    template<typename Promise = PromiseBase> requires std::is_base_of_v<PromiseBase, Promise>
+    auto
+    HandleReinterpretCast(
+        std::coroutine_handle<> handle) -> std::coroutine_handle<Promise>;
 
     template<typename Ret>
     struct PromiseType : PromiseBase {
@@ -116,11 +130,24 @@ namespace EasyCoro {
 
         SimpleAwaitable<Ret> get_return_object();
 
-        std::suspend_always initial_suspend() {
+        static std::suspend_never initial_suspend() noexcept {
             return {};
         }
 
-        std::suspend_always final_suspend() noexcept { return {}; }
+        static std::suspend_always final_suspend() noexcept {
+            return {};
+        }
+
+        template<typename T>
+        decltype(auto) await_transform(T &&awaiter) {
+            return std::forward<decltype(awaiter)>(awaiter);
+        }
+
+        template<typename T>
+        SimpleAwaitable<T> await_transform(SimpleAwaitable<T> awaitable);
+
+        template<class Fn>
+        std::suspend_never await_transform(AwaitToDoImmediate<Fn> &&awaiter);
 
         void return_value(Ret value) {
             // Protect
@@ -165,11 +192,21 @@ namespace EasyCoro {
 
         SimpleAwaitable<void> get_return_object();
 
-        std::suspend_always initial_suspend() {
-            return {};
-        }
+        std::suspend_never initial_suspend() { return {}; }
 
         constexpr static std::suspend_always final_suspend() noexcept { return {}; }
+
+        template<typename T>
+        decltype(auto) await_transform(T &&awaiter) {
+            return std::forward<decltype(awaiter)>(awaiter);
+        }
+
+        template<typename T>
+        SimpleAwaitable<T> await_transform(SimpleAwaitable<T> awaitable);
+
+        template<class Fn>
+        std::suspend_never await_transform(AwaitToDoImmediate<Fn> &&awaiter);
+
 
         void return_void() {
             // Protect
@@ -196,18 +233,21 @@ namespace EasyCoro {
     };
 
 
-    template<typename Promise = PromiseBase> requires std::is_base_of_v<PromiseBase, Promise>
-    auto PointerToHandleCast(
-        std::shared_ptr<void> ptr) -> std::coroutine_handle<Promise>;
+    struct AwaitToGetThisHandle {
+        std::coroutine_handle<> parentHandle;
 
-    template<typename T>
-    const std::weak_ptr<void> &HandleToPointerCast(
-        std::coroutine_handle<T> handle);
+        bool await_ready() const noexcept { return false; }
 
-    template<typename Promise = PromiseBase> requires std::is_base_of_v<PromiseBase, Promise>
-    auto
-    HandleReinterpretCast(
-        std::coroutine_handle<> handle) -> std::coroutine_handle<Promise>;
+        void await_suspend(std::coroutine_handle<> handle) {
+            parentHandle = handle;
+            // GetCurrentExecutionContext().Schedule(HandleToPointerCast<void>(handle).lock());
+            HandleReinterpretCast<PromiseBase>(handle).promise().Schedule();
+        }
+
+        std::coroutine_handle<> await_resume() const noexcept {
+            return parentHandle;
+        }
+    };
 
 
     SimpleAwaitable<void> Sleep(auto duration);
@@ -259,33 +299,37 @@ namespace EasyCoro {
         }
 
         void await_suspend(std::coroutine_handle<> parentHandle) {
-            if (auto self = GetMyHandle().promise().Self.lock()) {
-                if (!GetMyHandle().promise().OnFinished) {
-                    std::lock_guard lock(GetMyHandle().promise().ResultProtectMutex);
+            // if (auto self = GetMyHandle().promise().Self.lock()) {
+            //     if (!GetMyHandle().promise().OnFinished) {
+            //         std::lock_guard lock(GetMyHandle().promise().ResultProtectMutex);
+            //
+            //         auto parent = HandleReinterpretCast<PromiseBase>(parentHandle);
+            //         if (parent.promise().NotCancellable) {
+            //             GetMyHandle().promise().OnFinished = [
+            //                         strongParent = HandleToPointerCast(parentHandle).lock()
+            //                     ] mutable {
+            //                         PointerToHandleCast<PromiseBase>(strongParent).promise().Schedule();
+            //                     };
+            //         } else {
+            //             GetMyHandle().promise().OnFinished = [
+            //                 parentHandle = HandleToPointerCast<void>(parentHandle)
+            //             ] {
+            //                 if (auto copied = parentHandle.lock()) {
+            //                     PointerToHandleCast<PromiseBase>(copied).promise().Schedule();
+            //                 }
+            //             };
+            //         }
+            //     }
+            //     SetContext(HandleReinterpretCast<PromiseBase>(parentHandle).promise().Context);
+            //     assert(HandleReinterpretCast<PromiseBase>(parentHandle).promise().Context);
+            //     PointerToHandleCast<PromiseBase>(self).promise().Schedule();
+            // } else {
+            //     __debugbreak();
+            // }
+        }
 
-                    auto parent = HandleReinterpretCast<PromiseBase>(parentHandle);
-                    if (parent.promise().NotCancellable) {
-                        GetMyHandle().promise().OnFinished = [
-                                    strongParent = HandleToPointerCast(parentHandle).lock()
-                                ] mutable {
-                                    PointerToHandleCast<PromiseBase>(strongParent).promise().Schedule();
-                                };
-                    } else {
-                        GetMyHandle().promise().OnFinished = [
-                            parentHandle = HandleToPointerCast<void>(parentHandle)
-                        ] {
-                            if (auto copied = parentHandle.lock()) {
-                                PointerToHandleCast<PromiseBase>(copied).promise().Schedule();
-                            }
-                        };
-                    }
-                }
-                SetContext(HandleReinterpretCast<PromiseBase>(parentHandle).promise().Context);
-                assert(HandleReinterpretCast<PromiseBase>(parentHandle).promise().Context);
-                PointerToHandleCast<PromiseBase>(self).promise().Schedule();
-            } else {
-                __debugbreak();
-            }
+        ExecutionContext *GetContext() const {
+            return GetMyHandle().promise().Context;
         }
 
         void Cancel() {
@@ -398,7 +442,8 @@ namespace EasyCoro {
 
             if constexpr (std::convertible_to<decltype(provider), typename Ret::value_type>) {
                 co_return static_cast<Ret::value_type>(provider);
-            } else if constexpr (std::is_same_v<std::invoke_result_t<decltype(provider)>, typename Ret::value_type>) {
+            } else if constexpr (std::convertible_to<std::invoke_result_t<decltype(provider)>, typename
+                Ret::value_type>) {
                 co_return provider();
             } else if constexpr (std::is_same_v<std::invoke_result_t<decltype(provider)>,
                 SimpleAwaitable<typename Ret::value_type>>) {
@@ -484,36 +529,40 @@ namespace EasyCoro {
         }
 
         void await_suspend(std::coroutine_handle<> parentHandle) {
-            if (auto self = GetMyHandle().promise().Self.lock()) {
-                if (!GetMyHandle().promise().OnFinished) {
-                    std::lock_guard lock(GetMyHandle().promise().ResultProtectMutex);
+            // if (auto self = GetMyHandle().promise().Self.lock()) {
+            //     if (!GetMyHandle().promise().OnFinished) {
+            //         std::lock_guard lock(GetMyHandle().promise().ResultProtectMutex);
+            //
+            //         auto parent = HandleReinterpretCast<PromiseBase>(parentHandle);
+            //         if (parent.promise().NotCancellable) {
+            //             GetMyHandle().promise().OnFinished = [
+            //                         strongParent = HandleToPointerCast(parentHandle).lock()
+            //                     ] mutable {
+            //                         // GetCurrentExecutionContext().Schedule(std::exchange(strongParent, nullptr));
+            //                         PointerToHandleCast<PromiseBase>(std::exchange(strongParent, nullptr)).promise().
+            //                                 Schedule();
+            //                     };
+            //         } else {
+            //             GetMyHandle().promise().OnFinished = [
+            //                 parentHandle = HandleToPointerCast<void>(parentHandle)
+            //             ] {
+            //                 if (auto copied = parentHandle.lock()) {
+            //                     // GetCurrentExecutionContext().Schedule(copied);
+            //                     PointerToHandleCast<PromiseBase>(copied).promise().Schedule();
+            //                 }
+            //             };
+            //         }
+            //     }
+            //     // GetCurrentExecutionContext().Schedule(self);
+            //     SetContext(HandleReinterpretCast<PromiseBase>(parentHandle).promise().Context);
+            //     PointerToHandleCast<PromiseBase>(self).promise().Schedule();
+            // } else {
+            //     __debugbreak();
+            // }
+        }
 
-                    auto parent = HandleReinterpretCast<PromiseBase>(parentHandle);
-                    if (parent.promise().NotCancellable) {
-                        GetMyHandle().promise().OnFinished = [
-                                    strongParent = HandleToPointerCast(parentHandle).lock()
-                                ] mutable {
-                                    // GetCurrentExecutionContext().Schedule(std::exchange(strongParent, nullptr));
-                                    PointerToHandleCast<PromiseBase>(std::exchange(strongParent, nullptr)).promise().
-                                            Schedule();
-                                };
-                    } else {
-                        GetMyHandle().promise().OnFinished = [
-                            parentHandle = HandleToPointerCast<void>(parentHandle)
-                        ] {
-                            if (auto copied = parentHandle.lock()) {
-                                // GetCurrentExecutionContext().Schedule(copied);
-                                PointerToHandleCast<PromiseBase>(copied).promise().Schedule();
-                            }
-                        };
-                    }
-                }
-                // GetCurrentExecutionContext().Schedule(self);
-                SetContext(HandleReinterpretCast<PromiseBase>(parentHandle).promise().Context);
-                PointerToHandleCast<PromiseBase>(self).promise().Schedule();
-            } else {
-                __debugbreak();
-            }
+        ExecutionContext *GetContext() const {
+            return GetMyHandle().promise().Context;
         }
 
         void Cancel() {
@@ -605,24 +654,34 @@ namespace EasyCoro {
         }
     };
 
-
     template<typename Ret>
     Ret ExecutionContext::BlockOn(SimpleAwaitable<Ret> awaitable) {
         std::binary_semaphore semaphore(0);
-        auto wrapper = [&awaitable
-                ] mutable -> SimpleAwaitable<Ret> {
-                    auto result = co_await awaitable;
-                    co_return result;
-                }();
+        auto wrapper = [&awaitable, this, &semaphore]() mutable -> SimpleAwaitable<Ret> {
+            auto &copied = awaitable;
+            auto copiedThis = this;
+            auto &innerSemaphore = semaphore;
+            co_await AwaitToDoImmediate{
+                [copiedThis, &innerSemaphore](std::coroutine_handle<> handle) {
+                    auto myHandle = HandleReinterpretCast<PromiseBase>(handle);
+                    myHandle.promise().Context = copiedThis;
+                    myHandle.promise().OnFinished = [&innerSemaphore] {
+                        innerSemaphore.release();
+                    };
+                }
+            };
 
-        wrapper.SetOnFinished([&semaphore] {
-            semaphore.release();
-        });
+            std::cout << "Blocking on awaitable...\n" << std::flush;
+            auto result = co_await copied;
+            std::cout << "Awaitable completed.\n";
+            co_return result;
+        }();
 
         auto handlePtr = wrapper.GetHandlePtr();
 
-        wrapper.SetContext(this);
+        std::cout << "Scheduling wrapper coroutine...\n" << std::flush;
         wrapper.GetMyHandle().promise().Schedule();
+        std::cout << "Waiting for wrapper coroutine to complete...\n" << std::flush;
 
         semaphore.acquire();
 
@@ -633,19 +692,27 @@ namespace EasyCoro {
     template<>
     void ExecutionContext::BlockOn(SimpleAwaitable<void> awaitable) {
         std::binary_semaphore semaphore(0);
-        auto wrapper = [&awaitable
-                ] mutable -> SimpleAwaitable<void> {
-                    co_await awaitable;
-                    co_return;
-                }();
+        auto wrapper = [&awaitable, this, &semaphore] mutable -> SimpleAwaitable<void> {
+            auto &copied = awaitable;
+            auto copiedThis = this;
+            auto &innerSemaphore = semaphore;
 
-        wrapper.SetOnFinished([&semaphore] {
-            semaphore.release();
-        });
+            co_await AwaitToDoImmediate{
+                [copiedThis, &innerSemaphore](std::coroutine_handle<> handle) {
+                    auto myHandle = HandleReinterpretCast<PromiseBase>(handle);
+                    myHandle.promise().Context = copiedThis;
+                    myHandle.promise().OnFinished = [&innerSemaphore] {
+                        innerSemaphore.release();
+                    };
+                }
+            };
+
+            co_await copied;
+            co_return;
+        }();
 
         auto handlePtr = wrapper.GetHandlePtr();
 
-        wrapper.SetContext(this);
         wrapper.GetMyHandle().promise().Schedule();
 
         semaphore.acquire();
@@ -662,6 +729,62 @@ namespace EasyCoro {
     SimpleAwaitable<Ret> PromiseType<Ret>::get_return_object() {
         ++g_AllocCount;
         return SimpleAwaitable<Ret>(std::coroutine_handle<PromiseType>::from_promise(*this));
+    }
+
+    template<typename Ret>
+    template<typename T>
+    SimpleAwaitable<T> PromiseType<Ret>::await_transform(SimpleAwaitable<T> awaitable) {
+        awaitable.SetContext(Context);
+        auto parentHandle = Self.lock();
+        assert(parentHandle);
+        if (NotCancellable) {
+            awaitable.SetOnFinished([strongParent = parentHandle]mutable {
+                PointerToHandleCast<PromiseBase>(std::exchange(strongParent, nullptr)).promise().
+                        Schedule();
+            });
+        } else {
+            awaitable.SetOnFinished([parentHandle = Self]mutable {
+                if (auto copied = parentHandle.lock()) {
+                    PointerToHandleCast<PromiseBase>(copied).promise().Schedule();
+                }
+            });
+        }
+
+        return awaitable;
+    }
+
+    template<typename T>
+    SimpleAwaitable<T> PromiseType<void>::await_transform(SimpleAwaitable<T> awaitable) {
+        awaitable.SetContext(Context);
+        auto parentHandle = Self.lock();
+        assert(parentHandle);
+        if (NotCancellable) {
+            awaitable.SetOnFinished([strongParent = parentHandle] mutable {
+                PointerToHandleCast<PromiseBase>(std::exchange(strongParent, nullptr)).promise().
+                        Schedule();
+            });
+        } else {
+            awaitable.SetOnFinished([parentHandle = Self] mutable {
+                if (auto copied = parentHandle.lock()) {
+                    PointerToHandleCast<PromiseBase>(copied).promise().Schedule();
+                }
+            });
+        }
+
+        return awaitable;
+    }
+
+    template<typename Ret>
+    template<typename Fn>
+    std::suspend_never PromiseType<Ret>::await_transform(AwaitToDoImmediate<Fn> &&awaiter) {
+        awaiter.func(std::coroutine_handle<PromiseType>::from_promise(*this));
+        return {};
+    }
+
+    template<typename Fn>
+    std::suspend_never PromiseType<void>::await_transform(AwaitToDoImmediate<Fn> &&awaiter) {
+        awaiter.func(std::coroutine_handle<PromiseType>::from_promise(*this));
+        return {};
     }
 
     template<typename Promise> requires std::is_base_of_v<PromiseBase, Promise>
@@ -687,21 +810,6 @@ namespace EasyCoro {
             handle.address());
     }
 
-    struct AwaitToGetThisHandle {
-        std::coroutine_handle<> parentHandle;
-
-        bool await_ready() const noexcept { return false; }
-
-        void await_suspend(std::coroutine_handle<> handle) {
-            parentHandle = handle;
-            // GetCurrentExecutionContext().Schedule(HandleToPointerCast<void>(handle).lock());
-            HandleReinterpretCast<PromiseBase>(handle).promise().Schedule();
-        }
-
-        std::coroutine_handle<> await_resume() const noexcept {
-            return parentHandle;
-        }
-    };
 
     export template<typename... Tps>
     SimpleAwaitable<std::tuple<typename SimpleAwaitable<Tps>::ReturnType...>>
@@ -808,6 +916,7 @@ namespace EasyCoro {
             co_return func(std::forward<Args>(args)...);
         };
     }
+
 
     SimpleAwaitable<void> Sleep(auto duration) {
         std::this_thread::sleep_for(duration);
