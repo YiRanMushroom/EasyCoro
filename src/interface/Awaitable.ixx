@@ -10,8 +10,7 @@ namespace EasyCoro {
     struct Finally {
         Fn func;
 
-        Finally(Fn f) : func(std::move(f)) {
-        }
+        Finally(Fn f) : func(std::move(f)) {}
 
         ~Finally() {
             func();
@@ -22,16 +21,14 @@ namespace EasyCoro {
     struct AwaitToDo : std::suspend_always {
         Fn func;
 
-        AwaitToDo(Fn f) : func(std::move(f)) {
-        }
+        AwaitToDo(Fn f) : func(std::move(f)) {}
 
         void await_suspend(std::coroutine_handle<>) {
             func();
         }
     };
 
-    export struct Unit {
-    };
+    export struct Unit {};
 
     export class ExecutionContext;
 
@@ -49,8 +46,7 @@ namespace EasyCoro {
                 }, [] {
                     CurrentExecutionContext = nullptr;
                 })
-            } {
-        }
+            } {}
 
         void Schedule(std::shared_ptr<void> handle) {
             m_ThreadPool->Enqueue([weak = std::weak_ptr(handle)] {
@@ -62,18 +58,6 @@ namespace EasyCoro {
                 }
             });
         }
-
-        // void ScheduleStrong(std::shared_ptr<void> handle) {
-        //     if (!handle) {
-        //         throw std::runtime_error("Cannot schedule a null handle");
-        //     }
-        //     m_ThreadPool->Enqueue([handle = std::move(handle)]() mutable {
-        //         std::coroutine_handle<> coroHandle = std::coroutine_handle<>::from_address(handle.get());
-        //         if (!coroHandle.done()) {
-        //             coroHandle.resume();
-        //         }
-        //     });
-        // }
 
         void WaitAllTaskToFinish() {
             m_ThreadPool->WaitAllTaskToFinish();
@@ -106,13 +90,15 @@ namespace EasyCoro {
         auto &&handle
     );
 
-    template<typename Ret>
-    struct PromiseType {
+    struct PromiseBase {
         std::weak_ptr<void> Self;
 
         std::atomic_bool IsCancelled = false;
         std::function<void()> OnFinished = nullptr;
+    };
 
+    template<typename Ret>
+    struct PromiseType : PromiseBase {
         std::mutex ResultProtectMutex;
         std::variant<std::monostate, Ret, std::exception_ptr> Result{std::monostate{}};
 
@@ -145,12 +131,6 @@ namespace EasyCoro {
             }
         }
 
-        // void return_void() const {
-        //     if (!IsCancelled) {
-        //         throw std::runtime_error("Cannot return void from non-void coroutine which is not canceled");
-        //     }
-        // }
-
         void unhandled_exception() {
             std::scoped_lock lock(ResultProtectMutex);
             Result = std::current_exception();
@@ -158,12 +138,7 @@ namespace EasyCoro {
     };
 
     template<>
-    struct PromiseType<void> {
-        std::weak_ptr<void> Self;
-
-        std::atomic_bool IsCancelled = false;
-        std::function<void()> OnFinished = nullptr;
-
+    struct PromiseType<void> : PromiseBase {
         std::mutex ResultProtectMutex;
         std::variant<std::monostate, std::exception_ptr> Result{std::monostate{}};
 
@@ -193,18 +168,17 @@ namespace EasyCoro {
     };
 
 
-    template<typename Promise = PromiseType<void>>
+    template<typename Promise> requires std::is_base_of_v<PromiseBase, Promise>
     auto PointerToHandleCast(
         const std::shared_ptr<void> &ptr) -> std::coroutine_handle<Promise>;
 
-    template<typename Ret = void, typename T>
+    template<typename T>
     const std::weak_ptr<void> &HandleToPointerCast(
         std::coroutine_handle<T> handle);
 
-    template<typename Promise = PromiseType<void>>
     auto
     HandleReinterpretCast(
-        std::coroutine_handle<> handle) -> std::coroutine_handle<Promise>;
+        std::coroutine_handle<> handle) -> std::coroutine_handle<PromiseBase>;
 
 
     SimpleAwaitable<void> Sleep(auto duration);
@@ -329,8 +303,7 @@ namespace EasyCoro {
     };
 
     template<typename Ret>
-    class InjectUnwraps {
-    };
+    class InjectUnwraps {};
 
     template<typename Ret> requires requires(Ret ret) {
         { static_cast<bool>(ret) } -> std::convertible_to<bool>;
@@ -559,7 +532,7 @@ namespace EasyCoro {
         return SimpleAwaitable<Ret>{handle};
     }
 
-    template<typename Promise>
+    template<typename Promise> requires std::is_base_of_v<PromiseBase, Promise>
     auto PointerToHandleCast(
         const std::shared_ptr<void> &ptr) -> std::coroutine_handle<Promise> {
         assert(ptr);
@@ -567,18 +540,17 @@ namespace EasyCoro {
             ptr.get());
     }
 
-    template<typename Ret, typename T>
+    template<typename T>
     const std::weak_ptr<void> &HandleToPointerCast(
         std::coroutine_handle<T> handle) {
         assert(handle);
-        return HandleReinterpretCast<PromiseType<Ret>>(handle).promise().Self;
+        return HandleReinterpretCast(handle).promise().Self;
     }
 
-    template<typename Promise>
     auto HandleReinterpretCast(
-        std::coroutine_handle<> handle) -> std::coroutine_handle<Promise> {
+        std::coroutine_handle<> handle) -> std::coroutine_handle<PromiseBase> {
         assert(handle);
-        return std::coroutine_handle<Promise>::from_address(
+        return std::coroutine_handle<PromiseBase>::from_address(
             handle.address());
     }
 
