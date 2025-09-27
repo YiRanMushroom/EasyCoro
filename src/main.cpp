@@ -136,7 +136,7 @@ int main() {
 
                             std::cout << std::format("Value from random coroutine: {}\n", value);
 
-                            co_await EasyCoro::Pull(EasyCoro::TryUntilHasValue([] {
+                            co_await EasyCoro::Pull(EasyCoro::TryUntilHasValue([] -> std::optional<std::string> {
                                 auto input = GetConsoleInput();
                                 if (input) {
                                     std::cout << std::format("Received console input: {}\n", *input);

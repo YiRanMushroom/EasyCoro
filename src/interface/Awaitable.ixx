@@ -388,11 +388,11 @@ namespace EasyCoro {
     template<typename Ret>
     Ret ExecutionContext::BlockOn(SimpleAwaitable<Ret> awaitable) {
         std::binary_semaphore semaphore(0);
-        auto wrapper = [](SimpleAwaitable<Ret> &awaitable) mutable -> SimpleAwaitable<Ret> {
-            auto copied = awaitable; // Make a copy to avoid dangling reference
+        auto wrapper = [awaitable]<typename Self>(this Self self) mutable -> SimpleAwaitable<Ret> {
+            auto copied = self.awaitable; // Make a copy to avoid dangling reference
             auto result = co_await std::move(copied);
             co_return result;
-        }(awaitable);
+        }();
 
         wrapper.SetContext(this);
         wrapper.SetOnFinished([&semaphore] {
@@ -412,10 +412,10 @@ namespace EasyCoro {
     template<>
     void ExecutionContext::BlockOn(SimpleAwaitable<void> awaitable) {
         std::binary_semaphore semaphore(0);
-        auto wrapper = [](SimpleAwaitable<void> &awaitable)mutable -> SimpleAwaitable<void> {
-            co_await awaitable;
+        auto wrapper = [awaitable]<typename Self>(this Self self)mutable -> SimpleAwaitable<void> {
+            co_await self.awaitable;
             co_return;
-        }(awaitable);
+        }();
 
         wrapper.SetContext(this);
         wrapper.SetOnFinished([&semaphore] {
@@ -747,11 +747,10 @@ namespace EasyCoro {
 
     export template<typename Func>
     auto AsynchronousOf(Func func) {
-        return [func]<typename... Args>(
-            Args &&... args) mutable -> SimpleAwaitable<decltype(func(args...))>  {
-            return [](Func func, Args &&... innerArgs) -> SimpleAwaitable<decltype(func(innerArgs...))> {
-                co_return func(std::forward<Args>(innerArgs)...);
-            }(std::move(func), std::forward<Args>(args)...);
+        return [func = std::move(func)]<typename Self, typename... Args>(
+            this Self self,
+            Args &&... args) mutable -> SimpleAwaitable<decltype(func(args...))> {
+                co_return self.func(std::forward<Args>(args)...);
         };
     }
 
@@ -966,22 +965,20 @@ namespace EasyCoro {
 
     export template<typename Func>
     auto TryUntilHasValue(Func func, std::chrono::milliseconds timeInterval = std::chrono::milliseconds(0)) {
-        return [func = std::move(func), timeInterval]<typename... Args>(
-            Args &&... args) mutable -> SimpleAwaitable<typename decltype(func(args...))::value_type> {
-            return [](Func func, std::chrono::milliseconds timeInterval, Args &&... args) mutable
-                -> SimpleAwaitable<typename decltype(func(args...))::value_type> {
-                        while (true) {
-                            auto value = co_await [](
-                                Func &func, Args &&... innerArgs) -> SimpleAwaitable<decltype(func(innerArgs...))> {
-                                        co_return func(std::forward<Args>(innerArgs)...);
-                                    }(func, std::forward<Args>(args)...);
-                            if (value) {
-                                co_return value.value();
-                            }
-                            if (timeInterval.count() > 0)
-                                std::this_thread::sleep_for(timeInterval);
-                        }
-                    }(std::move(func), timeInterval, std::forward<Args>(args)...);
+        return [func = std::move(func), timeInterval]<typename Self, typename... Args>(
+            this Self self,
+            Args &&... args) mutable -> SimpleAwaitable<typename std::invoke_result_t<Func, Args...>::value_type> {
+            while (true) {
+                auto value = co_await [func = self.func]<typename InnerSelf>(this InnerSelf self, Args &&... args)
+                    -> SimpleAwaitable<std::invoke_result_t<Func, Args...>> {
+                            co_return self.func(std::forward<Args>(args)...);
+                        }(std::forward<Args>(args)...);
+                if (value) {
+                    co_return value.value();
+                }
+                if (timeInterval.count() > 0)
+                    std::this_thread::sleep_for(timeInterval);
+            }
         };
     }
 
