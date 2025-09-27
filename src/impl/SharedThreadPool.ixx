@@ -35,6 +35,9 @@ namespace EasyCoro {
             EnqueueFunc([task]() { (*task)(); });
             return res;
         }
+
+    public:
+        virtual void Join() = 0;
     };
 
     export class SharedThreadPool : public IThreadPool {
@@ -58,6 +61,18 @@ namespace EasyCoro {
         }
 
     public:
+        void Join() override {
+            WaitAllTaskToFinish();
+            m_ShouldStop = true;
+            m_Condition.notify_all();
+            for (auto &thread: m_WorkerThreads) {
+                if (thread.joinable()) {
+                    thread.join();
+                }
+            }
+            m_WorkerThreads.clear();
+        }
+
         void SetSelf(const std::shared_ptr<SharedThreadPool> &self) {
             m_Self = self;
         }
@@ -70,7 +85,7 @@ namespace EasyCoro {
                     if constexpr (std::is_invocable_v<OnStartUp>) {
                         onStartUp();
                     }
-                    while (!self->m_ShouldStop) {
+                    while (!(self->m_ShouldStop && self->m_Tasks.empty())) {
                         std::function<void()> task;
 
                         // in a scope
@@ -164,6 +179,7 @@ namespace EasyCoro {
         StandardThreadPool() = default;
 
         void EnqueueFunc(std::function<void()> &&task) override = 0;
+
         /*{
             std::binary_semaphore sem1(0), sem2(0);
             std::atomic<std::shared_ptr<std::future<void>>> shared_ptr = std::make_shared<std::future<void>>(std::async(

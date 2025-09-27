@@ -67,14 +67,16 @@ namespace EasyCoro {
         template<typename Ret>
         Ret BlockOn(SimpleAwaitable<Ret> awaitable);
 
+        void Join() {
+            m_ThreadPool->Join();
+        }
+
     private:
         std::shared_ptr<IThreadPool> m_ThreadPool{};
     };
 
     void ExecutionContext::Schedule(std::shared_ptr<void> handle) {
-        // std::cout << std::format("Scheduling {}\n", (void *) handle.get()) << std::flush;
         m_ThreadPool->Enqueue([weak = std::weak_ptr(handle)] {
-            // std::this_thread::sleep_for(std::chrono::milliseconds(100));
             if (auto shared = weak.lock()) {
                 std::coroutine_handle<> coroHandle = std::coroutine_handle<>::from_address(shared.get());
                 if (!coroHandle.done()) {
@@ -471,6 +473,7 @@ namespace EasyCoro {
                 PointerToHandleCast<PromiseBase>(std::exchange(strongParent, nullptr)).promise().
                         Schedule();
             });
+            awaitable.Cancellable(false);
         } else {
             awaitable.SetOnFinished([parentHandle = Self]mutable {
                 if (auto copied = parentHandle.lock()) {
@@ -538,6 +541,7 @@ namespace EasyCoro {
                 PointerToHandleCast<PromiseBase>(std::exchange(strongParent, nullptr)).promise().
                         Schedule();
             });
+            awaitable.Cancellable(false);
         } else {
             awaitable.SetOnFinished([parentHandle = Self] mutable {
                 if (auto copied = parentHandle.lock()) {
@@ -969,13 +973,14 @@ namespace EasyCoro {
             this Self self,
             Args &&... args) mutable -> SimpleAwaitable<typename std::invoke_result_t<Func, Args...>::value_type> {
             while (true) {
-                auto value = co_await [func = self.func]<typename InnerSelf>(this InnerSelf self, Args &&... args)
+                auto value = co_await [](Func& func, Args &&... args)
                     -> SimpleAwaitable<std::invoke_result_t<Func, Args...>> {
-                            co_return self.func(std::forward<Args>(args)...);
-                        }(std::forward<Args>(args)...);
+                            co_return func(std::forward<Args>(args)...);
+                        }(self.func, std::forward<Args>(args)...);
                 if (value) {
                     co_return value.value();
                 }
+
                 if (timeInterval.count() > 0)
                     std::this_thread::sleep_for(timeInterval);
             }
