@@ -4,8 +4,8 @@ import std;
 import <cassert>;
 import <cstdlib>;
 
-EasyCoro::SimpleAwaitable<double> NestedCoroutine(EasyCoro::SimpleAwaitable<int> inner,
-                                                  EasyCoro::SimpleAwaitable<int> inner2) {
+EasyCoro::Awaitable<double> NestedCoroutine(EasyCoro::Awaitable<int> inner,
+                                                  EasyCoro::Awaitable<int> inner2) {
     std::cout << "Starting nested coroutine..." << '\n';
     int value = co_await inner;
     int value2 = co_await inner2;
@@ -13,7 +13,7 @@ EasyCoro::SimpleAwaitable<double> NestedCoroutine(EasyCoro::SimpleAwaitable<int>
     co_return value * 2.5 * value2;
 }
 
-EasyCoro::SimpleAwaitable<int> ExampleCoroutine() {
+EasyCoro::Awaitable<int> ExampleCoroutine() {
     std::cout << "Hello from coroutine!" << '\n';
     co_return 42;
 }
@@ -25,19 +25,19 @@ struct ReportDestructor {
 };
 
 
-EasyCoro::SimpleAwaitable<size_t> Sleep(int time) {
+EasyCoro::Awaitable<size_t> Sleep(int time) {
     // std::cout << std::format("Sleeping for {} ms...\n", time);
     std::this_thread::sleep_for(std::chrono::milliseconds(time));
     co_return time;
 }
 
-EasyCoro::SimpleAwaitable<size_t> Sleep(int time, auto &&... rest) {
+EasyCoro::Awaitable<size_t> Sleep(int time, auto &&... rest) {
     size_t result = 0;
     result += co_await Sleep(std::forward<decltype(rest)>(rest)...);
     co_return result;
 }
 
-EasyCoro::SimpleAwaitable<void> ReturnVoid() {
+EasyCoro::Awaitable<void> ReturnVoid() {
     co_await Sleep(0);
     co_return;
 }
@@ -77,7 +77,7 @@ std::optional<std::string> GetConsoleInput() {
 
 std::atomic_size_t g_AllocCount = 0;
 
-EasyCoro::SimpleAwaitable<size_t> (*SleepPtr)(int) = Sleep;
+EasyCoro::Awaitable<size_t> (*SleepPtr)(int) = Sleep;
 
 // specialize formatter<std::option<T>>
 template<typename T>
@@ -119,19 +119,19 @@ int main() {
 
         try {
             auto now = std::chrono::high_resolution_clock::now();
-            for (int i = 0; i < 1; ++i) {
+            for (int i = 0; i < 1000; ++i) {
                 context.BlockOn(
                     EasyCoro::AnyOf(
-                        Sleep(0).Then(SleepPtr).Then(SleepPtr).Then(SleepPtr).Then(SleepPtr).Then(SleepPtr).
-                        Then(SleepPtr).Then(SleepPtr).Then(SleepPtr),
-                        EasyCoro::Pull([] -> EasyCoro::SimpleAwaitable<std::optional<size_t>> {
+                        Sleep(0).Then(SleepPtr).Then(SleepPtr).Then(SleepPtr).Then(SleepPtr)
+                        .Then(SleepPtr).Then(SleepPtr).Then(SleepPtr).Then(SleepPtr),
+                        EasyCoro::Pull([] -> EasyCoro::Awaitable<std::optional<size_t>> {
                             if (rand() % 2 == 0) {
                                 co_return std::nullopt;
                             }
                             co_return std::nullopt;
                         })
                         .UnWrapOr([] { return rand(); })
-                        .Then([&](size_t value) -> EasyCoro::SimpleAwaitable<std::string> {
+                        .Then([&](size_t value) -> EasyCoro::Awaitable<std::string> {
                             static std::atomic_size_t localCounter = 0;
                             ++localCounter;
                             static EasyCoro::Finally report([&] {
@@ -141,18 +141,16 @@ int main() {
                             std::cout << std::format("Value from random coroutine: {}\n", value);
 
                             co_return co_await EasyCoro::Pull(EasyCoro::TryUntilHasValue(
-                                        GetConsoleInput, std::chrono::milliseconds(10))).WithTimeOut(std::chrono::seconds(10))
+                                        GetConsoleInput, std::chrono::milliseconds(10))).WithTimeOut(
+                                        std::chrono::milliseconds(100))
                                     .UnWrapOr("Default Value");
-
-
-                            // co_return "Hi";
                         })
                         .Then(EasyCoro::AsynchronousOf([](std::string str) {
                                 std::cout << std::format("Processing string asynchronously: {}\n", str);
                                 return str.size();
                             })
                         )
-                        .Then([](auto thing) -> EasyCoro::SimpleAwaitable<void> {
+                        .Then([](auto thing) -> EasyCoro::Awaitable<void> {
                             std::cout << std::format("Completed AnyOf {}\n", thing);
                             co_return;
                         })
