@@ -559,7 +559,7 @@ namespace EasyCoro {
     }
 
     template<typename T>
-    Awaitable<T> && PromiseBase::await_transform(Awaitable<T> &&awaitable) {
+    Awaitable<T> &&PromiseBase::await_transform(Awaitable<T> &&awaitable) {
         awaitable.SetContext(Context);
         auto parentHandle = Self.lock();
         assert(parentHandle);
@@ -569,7 +569,7 @@ namespace EasyCoro {
             }
         });
 
-        return std::forward<Awaitable<T>&&>(awaitable);
+        return std::forward<Awaitable<T> &&>(awaitable);
     }
 
     template<typename Fn>
@@ -1065,12 +1065,34 @@ namespace EasyCoro {
             this Self self,
             Args &&... args) mutable -> Awaitable<typename std::invoke_result_t<Func, Args...>::value_type> {
             while (true) {
-                auto value = co_await [](Func func, Args &&... args)
-                    -> Awaitable<std::invoke_result_t<Func, Args...>> {
-                            co_return func(std::forward<Args>(args)...);
-                        }(self.func, std::forward<Args>(args)...);
-                if (value) {
-                    co_return *value;
+                if constexpr (requires(const Func func) {
+                    func(std::forward<Args>(args)...);
+                }) {
+                    // Function can be called by const, always move function to reduce copy, this works because const
+                    // function can be called multiple times
+                    auto [value, func] = co_await [](const Func func, Args &&... args)
+                        -> Awaitable<std::pair<std::invoke_result_t<Func, Args...>, Func>> {
+                                auto result = func(std::forward<Args>(args)...);
+                                co_return std::make_pair(std::move(result), std::move(func));
+                            }(std::move(self.func), std::forward<Args>(args)...);
+
+                    if (value) {
+                        co_return *value;
+                    }
+
+                    self.func = std::move(func);
+                } else {
+                    // Function cannot be called by const, we need to always copy the function because function which
+                    // cannot be called by const may modify its state and may only be called once. This is rare though,
+                    // most C++ functions can be called by const.
+                    auto value = co_await [](Func func, Args &&... args)
+                        -> Awaitable<std::invoke_result_t<Func, Args...>> {
+                                co_return func(std::forward<Args>(args)...);
+                            }(self.func, std::forward<Args>(args)...);
+
+                    if (value) {
+                        co_return *value;
+                    }
                 }
 
                 if (timeInterval.count() > 0)
