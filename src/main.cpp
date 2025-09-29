@@ -151,7 +151,8 @@ int main() {
                                 >> [](auto thing) -> EasyCoro::Awaitable<void> {
                                     std::cout << std::format("Completed AnyOf {}\n", thing);
                                     co_return;
-                                });
+                                }
+                                >> EasyCoro::Cancellable(false));
             }
             auto later = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(later - now).count();
