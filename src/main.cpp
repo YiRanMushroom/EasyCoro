@@ -121,7 +121,7 @@ int main() {
         try {
             auto now = std::chrono::high_resolution_clock::now();
             for (int i = 0; i < 10000; ++i) {
-                context.BlockOn(Sleep(0) >> SleepPtr >> SleepPtr
+                auto future = context.Async(Sleep(0) >> SleepPtr >> SleepPtr
                                 && (Sleep(0) >> SleepPtr >> SleepPtr || EasyCoro::Pull(
                                         [] -> EasyCoro::Awaitable<std::optional<size_t>> {
                                             if (rand() % 2 == 0) {
@@ -160,7 +160,7 @@ int main() {
                                         co_await (
                                             EasyCoro::Pull(
                                                 EasyCoro::TryUntilHasValue(
-                                                    GetConsoleInput, std::chrono::milliseconds(10)))
+                                                    GetConsoleInput, std::chrono::milliseconds(0)))
                                             .WithTimeOut(std::chrono::milliseconds(0))
                                             .UnwrapOr("Default Value") || EasyCoro::Pull(
                                                 EasyCoro::TryUntilHasValue(
@@ -188,7 +188,9 @@ int main() {
                                         co_return;
                                     }
                                     >> EasyCoro::Cancellable(false)));
+                future.get();
             }
+
             auto later = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(later - now).count();
             std::cout << "Total duration for 10000 iterations: " << duration << " ms" << std::endl;

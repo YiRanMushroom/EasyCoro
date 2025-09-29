@@ -101,6 +101,9 @@ namespace EasyCoro {
         template<typename Ret>
         Ret BlockOn(Awaitable<Ret> awaitable);
 
+        template<typename T> requires (CanInto<T>)
+        auto Async(T canInto);
+
         template<typename T> requires (CanInto<T> && !IsAwaitable<T>)
         void BlockOn(T canIntoType);
 
@@ -484,6 +487,15 @@ namespace EasyCoro {
         semaphore.acquire();
 
         return wrapper.GetResult();
+    }
+
+    template<typename T> requires (CanInto<T>)
+    auto ExecutionContext::Async(T canInto) {
+        auto future = std::async(std::launch::async, [this, awaitable = canInto.Move().Into()]() mutable {
+            return BlockOn(awaitable.Move());
+        });
+
+        return future;
     }
 
     template<typename T> requires (CanInto<T> && !IsAwaitable<T>)
