@@ -5,7 +5,7 @@ import <cassert>;
 import <cstdlib>;
 
 EasyCoro::Awaitable<double> NestedCoroutine(EasyCoro::Awaitable<int> inner,
-                                                  EasyCoro::Awaitable<int> inner2) {
+                                            EasyCoro::Awaitable<int> inner2) {
     std::cout << "Starting nested coroutine..." << '\n';
     int value = co_await inner;
     int value2 = co_await inner2;
@@ -117,46 +117,41 @@ int main() {
         std::string example2 = "Example string 2";
         std::string example3 = "Example string 3";
 
+
         try {
             auto now = std::chrono::high_resolution_clock::now();
             for (int i = 0; i < 1000; ++i) {
-                context.BlockOn(
-                    EasyCoro::AnyOf(
-                        Sleep(0).Then(SleepPtr).Then(SleepPtr).Then(SleepPtr).Then(SleepPtr)
-                        .Then(SleepPtr).Then(SleepPtr).Then(SleepPtr).Then(SleepPtr),
-                        EasyCoro::Pull([] -> EasyCoro::Awaitable<std::optional<size_t>> {
-                            if (rand() % 2 == 0) {
-                                co_return std::nullopt;
-                            }
-                            co_return std::nullopt;
-                        })
-                        .UnWrapOr([] { return rand(); })
-                        .Then([&](size_t value) -> EasyCoro::Awaitable<std::string> {
-                            static std::atomic_size_t localCounter = 0;
-                            ++localCounter;
-                            static EasyCoro::Finally report([&] {
-                                std::cout << std::format("Local counter: {}\n", localCounter.load());
-                            });
+                context.BlockOn(Sleep(0) >> SleepPtr >> SleepPtr
+                                && Sleep(0)
+                                || EasyCoro::Pull([] -> EasyCoro::Awaitable<std::optional<size_t>> {
+                                    if (rand() % 2 == 0) {
+                                        co_return std::nullopt;
+                                    }
+                                    co_return std::nullopt;
+                                })
+                                >> EasyCoro::UnwrapOr([] { return rand(); })
+                                >> [&](size_t value) -> EasyCoro::Awaitable<std::string> {
+                                    static std::atomic_size_t localCounter = 0;
+                                    ++localCounter;
+                                    static EasyCoro::Finally report([&] {
+                                        std::cout << std::format("Local counter: {}\n", localCounter.load());
+                                    });
 
-                            std::cout << std::format("Value from random coroutine: {}\n", value);
+                                    std::cout << std::format("Value from random coroutine: {}\n", value);
 
-                            co_return co_await EasyCoro::Pull(EasyCoro::TryUntilHasValue(
-                                        GetConsoleInput, std::chrono::milliseconds(10))).WithTimeOut(
-                                        std::chrono::milliseconds(100))
-                                    .UnWrapOr("Default Value");
-                        })
-                        .Then(EasyCoro::AsynchronousOf([](std::string str) {
-                                std::cout << std::format("Processing string asynchronously: {}\n", str);
-                                return str.size();
-                            })
-                        )
-                        .Then([](auto thing) -> EasyCoro::Awaitable<void> {
-                            std::cout << std::format("Completed AnyOf {}\n", thing);
-                            co_return;
-                        })
-                        .Cancellable(false)
-                    )
-                );
+                                    co_return co_await EasyCoro::Pull(EasyCoro::TryUntilHasValue(
+                                                GetConsoleInput, std::chrono::milliseconds(10))).WithTimeOut(
+                                                std::chrono::milliseconds(0))
+                                            .UnwrapOr("Default Value");
+                                }
+                                >> EasyCoro::AsynchronousOf([](std::string str) {
+                                    std::cout << std::format("Processing string asynchronously: {}\n", str);
+                                    return str.size();
+                                })
+                                >> [](auto thing) -> EasyCoro::Awaitable<void> {
+                                    std::cout << std::format("Completed AnyOf {}\n", thing);
+                                    co_return;
+                                });
             }
             auto later = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(later - now).count();

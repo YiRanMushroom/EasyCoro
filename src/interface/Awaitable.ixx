@@ -6,6 +6,10 @@ import <cassert>;
 import <cstddef>;
 
 namespace EasyCoro {
+    struct IntoType {};
+
+    export constexpr IntoType Into{};
+
     export template<typename Ret>
     class Awaitable;
 
@@ -67,6 +71,11 @@ namespace EasyCoro {
         template<typename Ret>
         Ret BlockOn(Awaitable<Ret> awaitable);
 
+        template<typename Tp>
+        void BlockOn(Tp canIntoType) requires requires {
+            canIntoType >> Into;
+        };
+
         void Join() {
             m_ThreadPool->Join();
         }
@@ -95,6 +104,12 @@ namespace EasyCoro {
         });
     }
 
+    template<typename... Tps>
+    struct AllOfType;
+
+    template<typename... Tps>
+    struct AnyOfType;
+
     struct PromiseBase {
         std::weak_ptr<void> Self{};
         std::atomic_bool IsCancelled = false;
@@ -111,6 +126,12 @@ namespace EasyCoro {
         decltype(auto) await_transform(T &&awaiter) {
             return std::forward<decltype(awaiter)>(awaiter);
         }
+
+        template<typename... Tps>
+        auto await_transform(AllOfType<Tps...>);
+
+        template<typename... Tps>
+        auto await_transform(AnyOfType<Tps...>);
 
         template<typename T>
         Awaitable<T> await_transform(Awaitable<T> awaitable);
@@ -286,7 +307,7 @@ namespace EasyCoro {
         auto UnwrapOrCancel(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type>;
 
         template<typename Provider>
-        auto UnWrapOr(this Awaitable<Ret> self, Provider provider) -> Awaitable<typename Ret::value_type>;
+        auto UnwrapOr(this Awaitable<Ret> self, Provider provider) -> Awaitable<typename Ret::value_type>;
 
         auto UnwrapOrDefault(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type>;
 
@@ -399,6 +420,11 @@ namespace EasyCoro {
         return wrapper.GetResult();
     }
 
+    template<typename Tp>
+    void ExecutionContext::BlockOn(Tp canIntoType) requires requires { canIntoType >> Into; } {
+        BlockOn(std::move(canIntoType) >> Into);
+    }
+
 
     template<>
     void ExecutionContext::BlockOn(Awaitable<void> awaitable) {
@@ -450,6 +476,7 @@ namespace EasyCoro {
         ++g_AllocCount;
         return Awaitable<Ret>(std::coroutine_handle<PromiseType>::from_promise(*this));
     }
+
 
     template<typename T>
     Awaitable<T> PromiseBase::await_transform(Awaitable<T> awaitable) {
@@ -717,7 +744,7 @@ namespace EasyCoro {
 
     template<typename Func>
     auto Awaitable<void>::Then(this Awaitable self,
-                                     Func &&func) -> std::invoke_result_t<Func> {
+                               Func &&func) -> std::invoke_result_t<Func> {
         co_await self;
         co_return co_await func();
     }
@@ -761,7 +788,7 @@ namespace EasyCoro {
         } -> std::convertible_to<typename Ret::value_type>;
     }
     template<typename Provider>
-    auto InjectUnwraps<Ret>::UnWrapOr(this Awaitable<Ret> self,
+    auto InjectUnwraps<Ret>::UnwrapOr(this Awaitable<Ret> self,
                                       Provider provider) -> Awaitable<typename Ret::value_type> {
         auto value = co_await self;
         if (value) {
@@ -911,7 +938,7 @@ namespace EasyCoro {
     template<typename Ret>
     template<typename Duration>
     auto Awaitable<Ret>::WithTimeOut(this Awaitable self,
-                                           Duration duration) -> Awaitable<std::optional<Ret>> {
+                                     Duration duration) -> Awaitable<std::optional<Ret>> {
         co_return std::get<0>(co_await AnyOf(
             self,
             Sleep(duration)
@@ -942,4 +969,230 @@ namespace EasyCoro {
     auto Pull(Func func) {
         return func();
     }
+}
+
+export template<typename Ret>
+auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::IntoType);
+
+export template<typename... Tps>
+auto operator>>(EasyCoro::AllOfType<Tps...> allOfType, EasyCoro::IntoType);
+
+export template<typename... Tps>
+auto operator>>(EasyCoro::AnyOfType<Tps...> AnyOfType, EasyCoro::IntoType);
+
+namespace EasyCoro {
+    template<typename... Tps>
+    struct AllOfType {
+        std::tuple<Tps...> values;
+
+        auto Into(this AllOfType self) {
+            return std::apply(
+                []<typename... T>(T &&... args) {
+                    return AllOf((std::forward<T>(args) >> EasyCoro::Into)...);
+                },
+                std::move(self.values));
+        }
+    };
+
+    template<typename... Tps>
+    struct AnyOfType {
+        std::tuple<Tps...> values;
+
+        auto Into(this AnyOfType self) {
+            return std::apply(
+                []<typename... T>(T &&... args) {
+                    return AnyOf((std::forward<T>(args) >> EasyCoro::Into)...);
+                },
+                std::move(self.values));
+        }
+    };
+
+    template<typename... Tps>
+    auto PromiseBase::await_transform(AllOfType<Tps...> allOfType) {
+        return std::move(allOfType).Into();
+    }
+
+    template<typename... Tps>
+    auto PromiseBase::await_transform(AnyOfType<Tps...> anyOfType) {
+        return std::move(anyOfType).Into();
+    }
+}
+
+export template<typename Ret>
+auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::IntoType) {
+    return awaitable;
+}
+
+export template<typename... Tps>
+auto operator>>(EasyCoro::AllOfType<Tps...> allOfType, EasyCoro::IntoType) {
+    return allOfType.Into();
+}
+
+export template<typename... Tps>
+auto operator>>(EasyCoro::AnyOfType<Tps...> anyOfType, EasyCoro::IntoType) {
+    return anyOfType.Into();
+}
+
+export template<typename... Tps, typename Ret>
+auto operator&&(EasyCoro::AllOfType<Tps...> allOfType, EasyCoro::Awaitable<Ret> awaitable) {
+    return EasyCoro::AllOfType<Tps..., EasyCoro::Awaitable<Ret>>{
+        std::tuple_cat(std::move(allOfType).values, std::make_tuple(std::move(awaitable)))
+    };
+}
+
+export template<typename... Tps, typename Ret>
+auto operator&&(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::AllOfType<Tps...> allOfType) {
+    return EasyCoro::AllOfType<EasyCoro::Awaitable<Ret>, Tps...>{
+        std::tuple_cat(std::make_tuple(std::move(awaitable)), std::move(allOfType).values)
+    };
+}
+
+export template<typename... Tps1, typename... Tps2>
+auto operator&&(EasyCoro::AllOfType<Tps1...> allOfType1, EasyCoro::AllOfType<Tps2...> allOfType2) {
+    return EasyCoro::AllOfType<Tps1..., Tps2...>{
+        std::tuple_cat(std::move(allOfType1).values, std::move(allOfType2).values)
+    };
+}
+
+export template<typename Ret1, typename Ret2>
+auto operator&&(EasyCoro::Awaitable<Ret1> awaitable1, EasyCoro::Awaitable<Ret2> awaitable2) {
+    return EasyCoro::AllOfType<EasyCoro::Awaitable<Ret1>, EasyCoro::Awaitable<Ret2>>{
+        std::make_tuple(std::move(awaitable1), std::move(awaitable2))
+    };
+}
+
+export template<typename... Tps, typename Ret>
+auto operator||(EasyCoro::AnyOfType<Tps...> anyOfType, EasyCoro::Awaitable<Ret> awaitable) {
+    return EasyCoro::AnyOfType<Tps..., EasyCoro::Awaitable<Ret>>{
+        std::tuple_cat(std::move(anyOfType).values, std::make_tuple(std::move(awaitable)))
+    };
+}
+
+export template<typename... Tps, typename Ret>
+auto operator||(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::AnyOfType<Tps...> anyOfType) {
+    return EasyCoro::AnyOfType<EasyCoro::Awaitable<Ret>, Tps...>{
+        std::tuple_cat(std::make_tuple(std::move(awaitable)), std::move(anyOfType).values)
+    };
+}
+
+export template<typename... Tps1, typename... Tps2>
+auto operator||(EasyCoro::AnyOfType<Tps1...> anyOfType1, EasyCoro::AnyOfType<Tps2...> anyOfType2) {
+    return EasyCoro::AnyOfType<Tps1..., Tps2...>{
+        std::tuple_cat(std::move(anyOfType1).values, std::move(anyOfType2).values)
+    };
+}
+
+export template<typename Ret1, typename Ret2>
+auto operator||(EasyCoro::Awaitable<Ret1> awaitable1, EasyCoro::Awaitable<Ret2> awaitable2) {
+    return EasyCoro::AnyOfType<EasyCoro::Awaitable<Ret1>, EasyCoro::Awaitable<Ret2>>{
+        std::make_tuple(std::move(awaitable1), std::move(awaitable2))
+    };
+}
+
+export template<typename... Tps1, typename... Tps2>
+auto operator&&(EasyCoro::AllOfType<Tps1...> allOfType, EasyCoro::AnyOfType<Tps2...> anyOfType) {
+    return allOfType.Into() && anyOfType.Into();
+}
+
+export template<typename... Tps1, typename... Tps2>
+auto operator&&(EasyCoro::AnyOfType<Tps1...> anyOfType, EasyCoro::AllOfType<Tps2...> allOfType) {
+    return anyOfType.Into() && allOfType.Into();
+}
+
+export template<typename Ret, typename... Tps>
+auto operator&&(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::AnyOfType<Tps...> anyOfType) {
+    return std::move(awaitable) && anyOfType.Into();
+}
+
+export template<typename Ret, typename... Tps>
+auto operator&&(EasyCoro::AnyOfType<Tps...> anyOfType, EasyCoro::Awaitable<Ret> awaitable) {
+    return anyOfType.Into() && std::move(awaitable);
+}
+
+export template<typename... Tps1, typename... Tps2>
+auto operator||(EasyCoro::AllOfType<Tps1...> allOfType, EasyCoro::AnyOfType<Tps2...> anyOfType) {
+    return allOfType.Into() || anyOfType.Into();
+}
+
+export template<typename... Tps1, typename... Tps2>
+auto operator||(EasyCoro::AnyOfType<Tps1...> anyOfType, EasyCoro::AllOfType<Tps2...> allOfType) {
+    return anyOfType.Into() || allOfType.Into();
+}
+
+export template<typename Ret, typename... Tps>
+auto operator||(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::AllOfType<Tps...> allOfType) {
+    return std::move(awaitable) || allOfType.Into();
+}
+
+export template<typename Ret, typename... Tps>
+auto operator||(EasyCoro::AllOfType<Tps...> allOfType, EasyCoro::Awaitable<Ret> awaitable) {
+    return allOfType.Into() || std::move(awaitable);
+}
+
+export template<typename Ret, typename Func>
+auto operator>>(EasyCoro::Awaitable<Ret> awaitable, Func &&func) -> std::invoke_result_t<Func, Ret> {
+    return awaitable.Then(std::forward<Func>(func));
+}
+
+namespace EasyCoro {
+    struct CancellableType {
+        bool IsCancellable;
+    };
+
+    export constexpr CancellableType Cancellable(bool value) {
+        return CancellableType{value};
+    }
+
+    struct UnwrapType {};
+
+    export constexpr UnwrapType Unwrap() {
+        return UnwrapType{};
+    }
+
+    struct UnwrapOrCancelType {};
+
+    export constexpr UnwrapOrCancelType UnwrapOrCancel() {
+        return UnwrapOrCancelType{};
+    }
+
+    struct UnwrapOrDefaultType {};
+
+    export constexpr UnwrapOrDefaultType UnwrapOrDefault() {
+        return UnwrapOrDefaultType{};
+    }
+
+    export template<typename T>
+    struct UnwrapOrType {
+        T provider;
+    };
+
+    export template<typename T>
+    constexpr UnwrapOrType<T> UnwrapOr(T provider) {
+        return UnwrapOrType<T>{std::move(provider)};
+    }
+}
+
+export template<typename Ret>
+auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::CancellableType cancellableType) {
+    return std::move(awaitable).Cancellable(cancellableType.IsCancellable);
+}
+
+export template<typename Ret>
+auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::UnwrapType) {
+    return std::move(awaitable).Unwrap();
+}
+
+export template<typename Ret>
+auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::UnwrapOrCancelType) {
+    return std::move(awaitable).UnwrapOrCancel();
+}
+
+export template<typename Ret>
+auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::UnwrapOrDefaultType) {
+    return std::move(awaitable).UnwrapOrDefault();
+}
+
+export template<typename Ret, typename T>
+auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::UnwrapOrType<T> unwrapOrType) {
+    return std::move(awaitable).UnwrapOr(std::move(unwrapOrType.provider));
 }
