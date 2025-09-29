@@ -142,7 +142,6 @@ namespace EasyCoro {
         std::weak_ptr<void> Self{};
         std::atomic_bool IsCancelled = false;
         std::atomic_bool NotCancellable = false;
-        // std::atomic_bool InitialSuspended = true;
         std::function<void()> OnFinished = nullptr;
         ExecutionContext *Context = nullptr;
 
@@ -150,7 +149,7 @@ namespace EasyCoro {
 
         void Schedule() const;
 
-        template<typename T>
+        template<typename T> requires (!IsAwaitable<std::remove_cvref_t<T>>)
         decltype(auto) await_transform(T &&awaiter) {
             return std::forward<decltype(awaiter)>(awaiter);
         }
@@ -162,7 +161,10 @@ namespace EasyCoro {
         auto await_transform(AnyOfType<Tps...>);
 
         template<typename T>
-        Awaitable<T> await_transform(Awaitable<T> awaitable);
+        const Awaitable<T> &await_transform(const Awaitable<T> &awaitable);
+
+        template<typename T>
+        Awaitable<T> &&await_transform(Awaitable<T> &&awaitable);
 
         template<class Fn>
         std::suspend_never await_transform(AwaitToDoImmediate<Fn> &&awaiter);
@@ -214,9 +216,12 @@ namespace EasyCoro {
 
         // co_return can have implicit move
         template<std::convertible_to<Ret> T>
-        void return_value(T&& value);
+        void return_value(T &&value);
 
         void return_value(Unit);
+
+        template<std::convertible_to<Ret> T>
+        std::suspend_always yield_value(T &&value);
 
         void unhandled_exception();
     };
@@ -310,18 +315,18 @@ namespace EasyCoro {
             return !GetMyHandle().promise().NotCancellable;
         }
 
-        void SetOnFinished(auto &&callback) {
+        void SetOnFinished(auto &&callback) const {
             std::lock_guard lock(GetMyHandle().promise().ResultProtectMutex);
             GetMyHandle().promise().OnFinished = std::forward<decltype(callback)>(callback);
         }
 
-        void SetContext(ExecutionContext *context) {
+        void SetContext(ExecutionContext *context) const {
             GetMyHandle().promise().Context = context;
         }
 
-        void await_resume();
+        void await_resume() const;
 
-        void await_suspend(std::coroutine_handle<> parentHandle) {
+        void await_suspend(std::coroutine_handle<> parentHandle) const {
             GetMyHandle().promise().Schedule();
         }
 
@@ -417,7 +422,7 @@ namespace EasyCoro {
             return false;
         }
 
-        void await_suspend(std::coroutine_handle<> parentHandle) {
+        void await_suspend(std::coroutine_handle<> parentHandle) const {
             GetMyHandle().promise().Schedule();
         }
 
@@ -435,13 +440,13 @@ namespace EasyCoro {
             return !GetMyHandle().promise().NotCancellable;
         }
 
-        void SetOnFinished(auto &&callback);
+        void SetOnFinished(auto &&callback) const;
 
-        void SetContext(ExecutionContext *context) {
+        void SetContext(ExecutionContext *context) const {
             GetMyHandle().promise().Context = context;
         }
 
-        Ret await_resume();
+        Ret await_resume() const;
 
         bool IsCancelled() const {
             return GetMyHandle().promise().IsCancelled;
@@ -540,7 +545,7 @@ namespace EasyCoro {
 
 
     template<typename T>
-    Awaitable<T> PromiseBase::await_transform(Awaitable<T> awaitable) {
+    const Awaitable<T> &PromiseBase::await_transform(const Awaitable<T> &awaitable) {
         awaitable.SetContext(Context);
         auto parentHandle = Self.lock();
         assert(parentHandle);
@@ -550,7 +555,21 @@ namespace EasyCoro {
             }
         });
 
-        return awaitable.Move();
+        return awaitable;
+    }
+
+    template<typename T>
+    Awaitable<T> && PromiseBase::await_transform(Awaitable<T> &&awaitable) {
+        awaitable.SetContext(Context);
+        auto parentHandle = Self.lock();
+        assert(parentHandle);
+        awaitable.SetOnFinished([parentHandle = Self]mutable {
+            if (auto copied = parentHandle.lock()) {
+                PointerToHandleCast<PromiseBase>(copied).promise().Schedule();
+            }
+        });
+
+        return std::forward<Awaitable<T>&&>(awaitable);
     }
 
     template<typename Fn>
@@ -562,14 +581,39 @@ namespace EasyCoro {
     template<typename Ret>
     template<std::convertible_to<Ret> T>
     void PromiseType<Ret>::return_value(T &&value) {
+        // Protect
         {
             std::scoped_lock lock(ResultProtectMutex);
             Result = Ret(std::move(value));
             if (OnFinished) {
                 OnFinished();
+                OnFinished = nullptr;
+                Context = nullptr;
             }
         }
         DetachedSelf.reset();
+    }
+
+    template<typename Ret>
+    template<std::convertible_to<Ret> T>
+    std::suspend_always PromiseType<Ret>::yield_value(T &&value) {
+        if (DetachedSelf) {
+            DetachedSelf.reset();
+            throw std::runtime_error("A generator coroutine must be cancellable");
+        }
+
+        // Protect
+        {
+            std::scoped_lock lock(ResultProtectMutex);
+            Result = Ret(std::move(value));
+            if (OnFinished) {
+                OnFinished();
+                OnFinished = nullptr;
+                Context = nullptr;
+            }
+        }
+
+        return {};
     }
 
     template<typename Ret>
@@ -579,6 +623,7 @@ namespace EasyCoro {
         }
         DetachedSelf.reset();
     }
+
 
     template<typename Ret>
     void PromiseType<Ret>::unhandled_exception() {
@@ -646,7 +691,7 @@ namespace EasyCoro {
         return self.Move();
     }
 
-    void Awaitable<void>::await_resume() {
+    void Awaitable<void>::await_resume() const {
         auto handle = GetMyHandle();
 
         std::lock_guard lock(handle.promise().ResultProtectMutex);
@@ -663,9 +708,17 @@ namespace EasyCoro {
 
     Unit Awaitable<void>::GetResult() {
         auto handle = GetMyHandle();
-        // assert(handle.done());
-        await_resume();
-        return Unit{};
+
+        std::lock_guard lock(handle.promise().ResultProtectMutex);
+        auto &variant = handle.promise().Result;
+        switch (variant.index()) {
+            case 0:
+                return Unit{};
+            case 1:
+                std::rethrow_exception(std::get<std::exception_ptr>(variant));
+            default:
+                throw std::runtime_error("Invalid state in coroutine result");
+        }
     }
 
     std::optional<Unit> Awaitable<void>::TryGetResult() {
@@ -934,13 +987,13 @@ namespace EasyCoro {
     }
 
     template<typename Ret>
-    void Awaitable<Ret>::SetOnFinished(auto &&callback) {
+    void Awaitable<Ret>::SetOnFinished(auto &&callback) const {
         std::lock_guard lock(GetMyHandle().promise().ResultProtectMutex);
         GetMyHandle().promise().OnFinished = std::forward<decltype(callback)>(callback);
     }
 
     template<typename Ret>
-    Ret Awaitable<Ret>::await_resume() {
+    Ret Awaitable<Ret>::await_resume() const {
         auto handle = GetMyHandle();
 
         std::lock_guard lock(handle.promise().ResultProtectMutex);
@@ -1012,7 +1065,7 @@ namespace EasyCoro {
             this Self self,
             Args &&... args) mutable -> Awaitable<typename std::invoke_result_t<Func, Args...>::value_type> {
             while (true) {
-                auto value = co_await [](Func &func, Args &&... args)
+                auto value = co_await [](Func func, Args &&... args)
                     -> Awaitable<std::invoke_result_t<Func, Args...>> {
                             co_return func(std::forward<Args>(args)...);
                         }(self.func, std::forward<Args>(args)...);
@@ -1078,12 +1131,12 @@ namespace EasyCoro {
 
     template<typename... Tps>
     auto PromiseBase::await_transform(AllOfType<Tps...> allOfType) {
-        return std::move(allOfType).Into();
+        return await_transform(std::move(allOfType).Into());
     }
 
     template<typename... Tps>
     auto PromiseBase::await_transform(AnyOfType<Tps...> anyOfType) {
-        return std::move(anyOfType).Into();
+        return await_transform(std::move(anyOfType).Into());
     }
 }
 
@@ -1239,6 +1292,14 @@ namespace EasyCoro {
     constexpr UnwrapOrType<T> UnwrapOr(T provider) {
         return UnwrapOrType<T>{std::move(provider)};
     }
+
+    struct WithTimeOutType {
+        std::chrono::milliseconds Duration;
+    };
+
+    export constexpr WithTimeOutType WithTimeOut(std::chrono::milliseconds duration) {
+        return WithTimeOutType{duration};
+    }
 }
 
 export template<typename Ret>
@@ -1264,4 +1325,9 @@ auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::UnwrapOrDefaultTyp
 export template<typename Ret, typename T>
 auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::UnwrapOrType<T> unwrapOrType) {
     return awaitable.Move().UnwrapOr(std::move(unwrapOrType.provider));
+}
+
+export template<typename Ret>
+auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::WithTimeOutType withTimeOutType) {
+    return awaitable.Move().WithTimeOut(withTimeOutType.Duration);
 }

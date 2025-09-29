@@ -122,12 +122,13 @@ int main() {
             auto now = std::chrono::high_resolution_clock::now();
             for (int i = 0; i < 10000; ++i) {
                 context.BlockOn(Sleep(0) >> SleepPtr >> SleepPtr
-                                && (Sleep(0) || EasyCoro::Pull([] -> EasyCoro::Awaitable<std::optional<size_t>> {
-                                        if (rand() % 2 == 0) {
+                                && (Sleep(0) >> SleepPtr >> SleepPtr || EasyCoro::Pull(
+                                        [] -> EasyCoro::Awaitable<std::optional<size_t>> {
+                                            if (rand() % 2 == 0) {
+                                                co_return std::nullopt;
+                                            }
                                             co_return std::nullopt;
-                                        }
-                                        co_return std::nullopt;
-                                    })
+                                        })
                                     >> EasyCoro::UnwrapOr([] { return rand(); })
                                     >> [&](size_t value) -> EasyCoro::Awaitable<std::string> {
                                         static std::atomic_size_t localCounter = 0;
@@ -138,9 +139,44 @@ int main() {
 
                                         std::cout << std::format("Value from random coroutine: {}\n", value);
 
-                                        co_return co_await EasyCoro::Pull(EasyCoro::TryUntilHasValue(
-                                                    GetConsoleInput, std::chrono::milliseconds(10))).WithTimeOut(
-                                                    std::chrono::milliseconds(0))
+                                        EasyCoro::Awaitable<std::optional<int>> generator = [](int time)
+                                            -> EasyCoro::Awaitable<std::optional<int>> {
+                                                    while (true) {
+                                                        int thisTime = time--;
+                                                        if (thisTime > 0) {
+                                                            co_yield thisTime;
+                                                        } else {
+                                                            co_return std::nullopt;
+                                                        }
+                                                    }
+                                                }(10);
+
+                                        while (true) {
+                                            auto val = co_await generator;
+                                            if (!val.has_value()) break;
+                                            std::cout << std::format("Generator yielded: {}\n", *val);
+                                        }
+
+                                        co_await (
+                                            EasyCoro::Pull(
+                                                EasyCoro::TryUntilHasValue(
+                                                    GetConsoleInput, std::chrono::milliseconds(10)))
+                                            .WithTimeOut(std::chrono::milliseconds(0))
+                                            .UnwrapOr("Default Value") || EasyCoro::Pull(
+                                                EasyCoro::TryUntilHasValue(
+                                                    GetConsoleInput, std::chrono::milliseconds(10)))
+                                            .WithTimeOut(std::chrono::milliseconds(0))
+                                            .UnwrapOr("Default Value") || EasyCoro::Pull(
+                                                EasyCoro::TryUntilHasValue(
+                                                    GetConsoleInput, std::chrono::milliseconds(10)))
+                                            .WithTimeOut(std::chrono::milliseconds(0))
+                                            .UnwrapOr("Default Value"));
+
+                                        co_return co_await
+                                                EasyCoro::Pull(
+                                                    EasyCoro::TryUntilHasValue(
+                                                        GetConsoleInput, std::chrono::milliseconds(10)))
+                                                .WithTimeOut(std::chrono::milliseconds(0))
                                                 .UnwrapOr("Default Value");
                                     }
                                     >> EasyCoro::AsynchronousOf([](std::string str) {
@@ -151,7 +187,7 @@ int main() {
                                         std::cout << std::format("Completed AnyOf {}\n", *thing);
                                         co_return;
                                     }
-                                    >> EasyCoro::Cancellable(true)));
+                                    >> EasyCoro::Cancellable(false)));
             }
             auto later = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(later - now).count();
