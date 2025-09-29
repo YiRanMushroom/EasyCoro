@@ -13,9 +13,31 @@ namespace EasyCoro {
     export template<typename Ret>
     class Awaitable;
 
+    template<typename T>
+    struct IsAwaitableImpl {
+        static constexpr bool value = false;
+    };
+
+    template<typename Ret>
+    struct IsAwaitableImpl<Awaitable<Ret>> {
+        static constexpr bool value = true;
+    };
+
+    export template<typename T>
+    concept IsAwaitable = IsAwaitableImpl<T>::value;
+
+    export template<typename T>
+    concept CanInto = requires(T t) {
+        std::move(t) >> Into;
+    };
+
     export template<typename Fn>
     struct Finally {
         Fn func;
+
+        Finally(const Finally &) = delete;
+
+        Finally &operator=(const Finally &) = delete;
 
         Finally(Fn f) : func(std::move(f)) {}
 
@@ -28,6 +50,10 @@ namespace EasyCoro {
     struct AwaitToDo : std::suspend_always {
         Fn func;
 
+        AwaitToDo(const AwaitToDo &) = delete;
+
+        AwaitToDo &operator=(const AwaitToDo &) = delete;
+
         AwaitToDo(Fn f) : func(std::move(f)) {}
 
         void await_suspend(std::coroutine_handle<> handle) {
@@ -38,6 +64,10 @@ namespace EasyCoro {
     template<typename Fn>
     struct AwaitToDoImmediate : std::suspend_never {
         Fn func;
+
+        AwaitToDoImmediate(const AwaitToDoImmediate &) = delete;
+
+        AwaitToDoImmediate &operator=(const AwaitToDoImmediate &) = delete;
 
         AwaitToDoImmediate(Fn f) : func(std::move(f)) {}
     };
@@ -71,10 +101,8 @@ namespace EasyCoro {
         template<typename Ret>
         Ret BlockOn(Awaitable<Ret> awaitable);
 
-        template<typename Tp>
-        void BlockOn(Tp canIntoType) requires requires {
-            canIntoType >> Into;
-        };
+        template<typename T> requires (CanInto<T> && !IsAwaitable<T>)
+        void BlockOn(T canIntoType);
 
         void Join() {
             m_ThreadPool->Join();
@@ -184,7 +212,9 @@ namespace EasyCoro {
             return {};
         }
 
-        void return_value(Ret value);
+        // co_return can have implicit move
+        template<std::convertible_to<Ret> T>
+        void return_value(T&& value);
 
         void return_value(Unit);
 
@@ -207,7 +237,6 @@ namespace EasyCoro {
         }
 
         constexpr static std::suspend_always final_suspend() noexcept { return {}; }
-
 
         void return_void();
 
@@ -238,6 +267,24 @@ namespace EasyCoro {
         }
 
     public:
+        Awaitable(const Awaitable &) = delete;
+
+        Awaitable &operator=(const Awaitable &) = delete;
+
+        Awaitable(Awaitable &&) = default;
+
+        Awaitable &operator=(Awaitable &&) = default;
+
+        Awaitable(std::weak_ptr<void> handlePtr) : m_MyHandlePtr(handlePtr.lock()) {}
+
+        Awaitable Clone() const {
+            return {m_MyHandlePtr};
+        }
+
+        Awaitable &&Move() {
+            return std::move(*this);
+        }
+
         [[nodiscard]] std::coroutine_handle<> GetHandle() const {
             return GetMyHandle();
         }
@@ -339,7 +386,23 @@ namespace EasyCoro {
         }
 
     public:
-        ~Awaitable() = default;
+        Awaitable(const Awaitable &) = delete;
+
+        Awaitable &operator=(const Awaitable &) = delete;
+
+        Awaitable(Awaitable &&) = default;
+
+        Awaitable &operator=(Awaitable &&) = default;
+
+        Awaitable(std::weak_ptr<void> handlePtr) : m_MyHandlePtr(handlePtr.lock()) {}
+
+        Awaitable Clone() const {
+            return {m_MyHandlePtr};
+        }
+
+        Awaitable &&Move() {
+            return std::move(*this);
+        }
 
         [[nodiscard]] std::coroutine_handle<> GetHandle() const {
             return GetMyHandle();
@@ -400,10 +463,8 @@ namespace EasyCoro {
     template<typename Ret>
     Ret ExecutionContext::BlockOn(Awaitable<Ret> awaitable) {
         std::binary_semaphore semaphore(0);
-        auto wrapper = [awaitable]<typename Self>(this Self self) mutable -> Awaitable<Ret> {
-            auto copied = self.awaitable; // Make a copy to avoid dangling reference
-            auto result = co_await std::move(copied);
-            co_return result;
+        auto wrapper = [awaitable = awaitable.Move()]<typename Self>(this Self self) mutable -> Awaitable<Ret> {
+            co_return co_await self.awaitable.Move();
         }();
 
         wrapper.SetContext(this);
@@ -420,8 +481,8 @@ namespace EasyCoro {
         return wrapper.GetResult();
     }
 
-    template<typename Tp>
-    void ExecutionContext::BlockOn(Tp canIntoType) requires requires { canIntoType >> Into; } {
+    template<typename T> requires (CanInto<T> && !IsAwaitable<T>)
+    void ExecutionContext::BlockOn(T canIntoType) {
         BlockOn(std::move(canIntoType) >> Into);
     }
 
@@ -429,8 +490,8 @@ namespace EasyCoro {
     template<>
     void ExecutionContext::BlockOn(Awaitable<void> awaitable) {
         std::binary_semaphore semaphore(0);
-        auto wrapper = [awaitable]<typename Self>(this Self self)mutable -> Awaitable<void> {
-            co_await self.awaitable;
+        auto wrapper = [awaitable = awaitable.Move()]<typename Self>(this Self self)mutable -> Awaitable<void> {
+            co_await self.awaitable.Move();
             co_return;
         }();
 
@@ -474,7 +535,7 @@ namespace EasyCoro {
     template<typename Ret>
     Awaitable<Ret> PromiseType<Ret>::get_return_object() {
         ++g_AllocCount;
-        return Awaitable<Ret>(std::coroutine_handle<PromiseType>::from_promise(*this));
+        return {std::coroutine_handle<PromiseType>::from_promise(*this)};
     }
 
 
@@ -489,7 +550,7 @@ namespace EasyCoro {
             }
         });
 
-        return awaitable;
+        return awaitable.Move();
     }
 
     template<typename Fn>
@@ -499,11 +560,11 @@ namespace EasyCoro {
     }
 
     template<typename Ret>
-    void PromiseType<Ret>::return_value(Ret value) {
-        // Protect
+    template<std::convertible_to<Ret> T>
+    void PromiseType<Ret>::return_value(T &&value) {
         {
             std::scoped_lock lock(ResultProtectMutex);
-            Result = std::move(value);
+            Result = Ret(std::move(value));
             if (OnFinished) {
                 OnFinished();
             }
@@ -534,7 +595,7 @@ namespace EasyCoro {
 
     Awaitable<void> PromiseType<void>::get_return_object() {
         ++g_AllocCount;
-        return Awaitable(std::coroutine_handle<PromiseType>::from_promise(*this));
+        return {std::coroutine_handle<PromiseType>::from_promise(*this)};
     }
 
     void PromiseType<void>::return_void() {
@@ -577,12 +638,12 @@ namespace EasyCoro {
         return GetMyHandle().promise().Context;
     }
 
-    Awaitable<void> Awaitable<void>::Cancellable(this Awaitable<void> self, bool value) {
+    Awaitable<void> Awaitable<void>::Cancellable(this Awaitable self, bool value) {
         self.GetMyHandle().promise().NotCancellable = !value;
         if (value == false) {
             self.GetMyHandle().promise().DetachedSelf = self.GetMyHandle().promise().Self.lock();
         }
-        return self;
+        return self.Move();
     }
 
     void Awaitable<void>::await_resume() {
@@ -651,13 +712,13 @@ namespace EasyCoro {
         ExecutionContext *context = PointerToHandleCast<PromiseBase>(parentHandle).promise().Context;
         ((awaitables.SetContext(context)), ...);
 
-        AwaitToDo awaiter([&](std::coroutine_handle<>) {
-            (awaitables.GetMyHandle().promise().Schedule(), ...);
+        co_await AwaitToDo{
+            [&](std::coroutine_handle<>) {
+                (awaitables.GetMyHandle().promise().Schedule(), ...);
 
-            semaphore.release(1);
-        });
-
-        co_await awaiter;
+                semaphore.release(1);
+            }
+        };
 
         auto result = std::make_tuple(std::move(awaitables.GetResult())...);
 
@@ -698,21 +759,18 @@ namespace EasyCoro {
         ExecutionContext *context = PointerToHandleCast<PromiseBase>(parentHandle).promise().Context;
         ((awaitables.SetContext(context)), ...);
 
-        AwaitToDo awaiter([&](std::coroutine_handle<>) {
-            auto applier = [](auto &awaitable) {
-                if (awaitable.IsCancellable()) {
+
+        co_await AwaitToDo{
+            [&](std::coroutine_handle<>) {
+                auto applier = [](auto &awaitable) {
                     awaitable.GetMyHandle().promise().Schedule();
-                } else {
-                    awaitable.GetMyHandle().promise().Schedule();
-                }
-            };
+                };
 
-            (applier(awaitables), ...);
+                (applier(awaitables), ...);
 
-            semaphore.release(1);
-        });
-
-        co_await awaiter;
+                semaphore.release(1);
+            }
+        };
 
         auto result = std::make_tuple(std::move(awaitables.TryGetResult())...);
 
@@ -745,7 +803,7 @@ namespace EasyCoro {
     template<typename Func>
     auto Awaitable<void>::Then(this Awaitable self,
                                Func &&func) -> std::invoke_result_t<Func> {
-        co_await self;
+        co_await self.Move();
         co_return co_await func();
     }
 
@@ -754,7 +812,7 @@ namespace EasyCoro {
     WithTimeOut(this Awaitable self,
                 Duration duration) -> Awaitable {
         co_await AnyOf(
-            self,
+            self.Move(),
             Sleep(duration)
         );
     }
@@ -766,18 +824,18 @@ namespace EasyCoro {
     }
     auto InjectUnwraps<Ret>::
     UnwrapOrCancel(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type> {
-        auto value = co_await self;
+        auto value = co_await self.Move();
         if (value) {
             co_return *value;
         }
 
-        AwaitToDo awaiter([](std::coroutine_handle<> thisHandle) {
-            auto myHandle = HandleReinterpretCast<PromiseType<Ret>>(thisHandle);
-            myHandle.promise().Cancel();
-            HandleReinterpretCast<PromiseBase>(thisHandle).promise().Schedule();
-        });
-
-        co_await awaiter;
+        co_await AwaitToDo{
+            [](std::coroutine_handle<> thisHandle) {
+                auto myHandle = HandleReinterpretCast<PromiseType<Ret>>(thisHandle);
+                myHandle.promise().Cancel();
+                HandleReinterpretCast<PromiseBase>(thisHandle).promise().Schedule();
+            }
+        };
 
         co_return Unit{};
     }
@@ -790,13 +848,13 @@ namespace EasyCoro {
     template<typename Provider>
     auto InjectUnwraps<Ret>::UnwrapOr(this Awaitable<Ret> self,
                                       Provider provider) -> Awaitable<typename Ret::value_type> {
-        auto value = co_await self;
+        auto value = co_await self.Move();
         if (value) {
             co_return *value;
         }
 
         if constexpr (std::convertible_to<Provider, typename Ret::value_type>) {
-            co_return static_cast<Ret::value_type>(provider);
+            co_return provider;
         } else if constexpr (std::convertible_to<std::invoke_result_t<Provider>, typename
             Ret::value_type>) {
             co_return provider();
@@ -818,7 +876,7 @@ namespace EasyCoro {
     }
     auto InjectUnwraps<Ret>::UnwrapOrDefault(
         this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type> {
-        auto value = co_await self;
+        auto value = co_await self.Move();
         if (value) {
             co_return *value;
         }
@@ -831,7 +889,7 @@ namespace EasyCoro {
         } -> std::convertible_to<typename Ret::value_type>;
     }
     auto InjectUnwraps<Ret>::Unwrap(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type> {
-        co_return *co_await self;
+        co_return *co_await self.Move();
     }
 
     template<typename Ret> requires requires(Ret ret) {
@@ -841,7 +899,7 @@ namespace EasyCoro {
     }
     auto InjectUnwraps<Ret>::
     UnwrapOrThrow(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type> {
-        auto value = co_await self;
+        auto value = co_await self.Move();
         if (value) {
             co_return *value;
         }
@@ -872,7 +930,7 @@ namespace EasyCoro {
         } else {
             self.GetMyHandle().promise().DetachedSelf.reset();
         }
-        return self;
+        return self.Move();
     }
 
     template<typename Ret>
@@ -902,7 +960,6 @@ namespace EasyCoro {
     template<typename Ret>
     Ret Awaitable<Ret>::GetResult() {
         auto handle = GetMyHandle();
-        // assert(handle.done());
 
         std::lock_guard lock(handle.promise().ResultProtectMutex);
         switch (handle.promise().Result.index()) {
@@ -931,8 +988,12 @@ namespace EasyCoro {
     template<typename Ret>
     template<typename Func>
     auto Awaitable<Ret>::Then(this Awaitable self, Func &&func) -> std::invoke_result_t<Func, Ret> {
-        auto value = co_await self;
-        co_return co_await func(value);
+        if constexpr (std::is_same_v<std::invoke_result_t<Func, Ret>, Awaitable<void>>) {
+            co_await func(co_await self.Move());
+            co_return;
+        } else {
+            co_return co_await func(co_await self.Move());
+        }
     }
 
     template<typename Ret>
@@ -940,7 +1001,7 @@ namespace EasyCoro {
     auto Awaitable<Ret>::WithTimeOut(this Awaitable self,
                                      Duration duration) -> Awaitable<std::optional<Ret>> {
         co_return std::get<0>(co_await AnyOf(
-            self,
+            self.Move(),
             Sleep(duration)
         ));
     }
@@ -956,7 +1017,7 @@ namespace EasyCoro {
                             co_return func(std::forward<Args>(args)...);
                         }(self.func, std::forward<Args>(args)...);
                 if (value) {
-                    co_return value.value();
+                    co_return *value;
                 }
 
                 if (timeInterval.count() > 0)
@@ -992,6 +1053,10 @@ namespace EasyCoro {
                 },
                 std::move(self.values));
         }
+
+        AllOfType &&Move() {
+            return std::move(*this);
+        }
     };
 
     template<typename... Tps>
@@ -1004,6 +1069,10 @@ namespace EasyCoro {
                     return AnyOf((std::forward<T>(args) >> EasyCoro::Into)...);
                 },
                 std::move(self.values));
+        }
+
+        AnyOfType &&Move() {
+            return std::move(*this);
         }
     };
 
@@ -1020,118 +1089,118 @@ namespace EasyCoro {
 
 export template<typename Ret>
 auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::IntoType) {
-    return awaitable;
+    return awaitable.Move();
 }
 
 export template<typename... Tps>
 auto operator>>(EasyCoro::AllOfType<Tps...> allOfType, EasyCoro::IntoType) {
-    return allOfType.Into();
+    return allOfType.Move().Into();
 }
 
 export template<typename... Tps>
 auto operator>>(EasyCoro::AnyOfType<Tps...> anyOfType, EasyCoro::IntoType) {
-    return anyOfType.Into();
+    return anyOfType.Move().Into();
 }
 
 export template<typename... Tps, typename Ret>
 auto operator&&(EasyCoro::AllOfType<Tps...> allOfType, EasyCoro::Awaitable<Ret> awaitable) {
     return EasyCoro::AllOfType<Tps..., EasyCoro::Awaitable<Ret>>{
-        std::tuple_cat(std::move(allOfType).values, std::make_tuple(std::move(awaitable)))
+        std::tuple_cat(std::move(allOfType.values), std::make_tuple(awaitable.Move()))
     };
 }
 
 export template<typename... Tps, typename Ret>
 auto operator&&(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::AllOfType<Tps...> allOfType) {
     return EasyCoro::AllOfType<EasyCoro::Awaitable<Ret>, Tps...>{
-        std::tuple_cat(std::make_tuple(std::move(awaitable)), std::move(allOfType).values)
+        std::tuple_cat(std::make_tuple(awaitable.Move()), std::move(allOfType.values))
     };
 }
 
 export template<typename... Tps1, typename... Tps2>
 auto operator&&(EasyCoro::AllOfType<Tps1...> allOfType1, EasyCoro::AllOfType<Tps2...> allOfType2) {
     return EasyCoro::AllOfType<Tps1..., Tps2...>{
-        std::tuple_cat(std::move(allOfType1).values, std::move(allOfType2).values)
+        std::tuple_cat(std::move(allOfType1.values), std::move(allOfType2.values))
     };
 }
 
 export template<typename Ret1, typename Ret2>
 auto operator&&(EasyCoro::Awaitable<Ret1> awaitable1, EasyCoro::Awaitable<Ret2> awaitable2) {
     return EasyCoro::AllOfType<EasyCoro::Awaitable<Ret1>, EasyCoro::Awaitable<Ret2>>{
-        std::make_tuple(std::move(awaitable1), std::move(awaitable2))
+        std::make_tuple(awaitable1.Move(), awaitable2.Move())
     };
 }
 
 export template<typename... Tps, typename Ret>
 auto operator||(EasyCoro::AnyOfType<Tps...> anyOfType, EasyCoro::Awaitable<Ret> awaitable) {
     return EasyCoro::AnyOfType<Tps..., EasyCoro::Awaitable<Ret>>{
-        std::tuple_cat(std::move(anyOfType).values, std::make_tuple(std::move(awaitable)))
+        std::tuple_cat(std::move(anyOfType.values), std::make_tuple(awaitable.Move()))
     };
 }
 
 export template<typename... Tps, typename Ret>
 auto operator||(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::AnyOfType<Tps...> anyOfType) {
     return EasyCoro::AnyOfType<EasyCoro::Awaitable<Ret>, Tps...>{
-        std::tuple_cat(std::make_tuple(std::move(awaitable)), std::move(anyOfType).values)
+        std::tuple_cat(std::make_tuple(awaitable.Move()), std::move(anyOfType.values))
     };
 }
 
 export template<typename... Tps1, typename... Tps2>
 auto operator||(EasyCoro::AnyOfType<Tps1...> anyOfType1, EasyCoro::AnyOfType<Tps2...> anyOfType2) {
     return EasyCoro::AnyOfType<Tps1..., Tps2...>{
-        std::tuple_cat(std::move(anyOfType1).values, std::move(anyOfType2).values)
+        std::tuple_cat(std::move(anyOfType1.values), std::move(anyOfType2.values))
     };
 }
 
 export template<typename Ret1, typename Ret2>
 auto operator||(EasyCoro::Awaitable<Ret1> awaitable1, EasyCoro::Awaitable<Ret2> awaitable2) {
     return EasyCoro::AnyOfType<EasyCoro::Awaitable<Ret1>, EasyCoro::Awaitable<Ret2>>{
-        std::make_tuple(std::move(awaitable1), std::move(awaitable2))
+        std::make_tuple(awaitable1.Move(), awaitable2.Move())
     };
 }
 
 export template<typename... Tps1, typename... Tps2>
 auto operator&&(EasyCoro::AllOfType<Tps1...> allOfType, EasyCoro::AnyOfType<Tps2...> anyOfType) {
-    return allOfType.Into() && anyOfType.Into();
+    return allOfType.Move().Into() && anyOfType.Move().Into();
 }
 
 export template<typename... Tps1, typename... Tps2>
 auto operator&&(EasyCoro::AnyOfType<Tps1...> anyOfType, EasyCoro::AllOfType<Tps2...> allOfType) {
-    return anyOfType.Into() && allOfType.Into();
+    return anyOfType.Move().Into() && allOfType.Move().Into();
 }
 
 export template<typename Ret, typename... Tps>
 auto operator&&(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::AnyOfType<Tps...> anyOfType) {
-    return std::move(awaitable) && anyOfType.Into();
+    return awaitable.Move() && anyOfType.Move().Into();
 }
 
 export template<typename Ret, typename... Tps>
 auto operator&&(EasyCoro::AnyOfType<Tps...> anyOfType, EasyCoro::Awaitable<Ret> awaitable) {
-    return anyOfType.Into() && std::move(awaitable);
+    return anyOfType.Move().Into() && awaitable.Move();
 }
 
 export template<typename... Tps1, typename... Tps2>
 auto operator||(EasyCoro::AllOfType<Tps1...> allOfType, EasyCoro::AnyOfType<Tps2...> anyOfType) {
-    return allOfType.Into() || anyOfType.Into();
+    return allOfType.Move().Into() || anyOfType.Move().Into();
 }
 
 export template<typename... Tps1, typename... Tps2>
 auto operator||(EasyCoro::AnyOfType<Tps1...> anyOfType, EasyCoro::AllOfType<Tps2...> allOfType) {
-    return anyOfType.Into() || allOfType.Into();
+    return anyOfType.Move().Into() || allOfType.Move().Into();
 }
 
 export template<typename Ret, typename... Tps>
 auto operator||(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::AllOfType<Tps...> allOfType) {
-    return std::move(awaitable) || allOfType.Into();
+    return awaitable.Move() || allOfType.Move().Into();
 }
 
 export template<typename Ret, typename... Tps>
 auto operator||(EasyCoro::AllOfType<Tps...> allOfType, EasyCoro::Awaitable<Ret> awaitable) {
-    return allOfType.Into() || std::move(awaitable);
+    return allOfType.Move().Into() || awaitable.Move();
 }
 
 export template<typename Ret, typename Func>
 auto operator>>(EasyCoro::Awaitable<Ret> awaitable, Func &&func) -> std::invoke_result_t<Func, Ret> {
-    return awaitable.Then(std::forward<Func>(func));
+    return awaitable.Move().Then(std::forward<Func>(func));
 }
 
 namespace EasyCoro {
@@ -1174,25 +1243,25 @@ namespace EasyCoro {
 
 export template<typename Ret>
 auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::CancellableType cancellableType) {
-    return std::move(awaitable).Cancellable(cancellableType.IsCancellable);
+    return awaitable.Move().Cancellable(cancellableType.IsCancellable);
 }
 
 export template<typename Ret>
 auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::UnwrapType) {
-    return std::move(awaitable).Unwrap();
+    return awaitable.Move().Unwrap();
 }
 
 export template<typename Ret>
 auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::UnwrapOrCancelType) {
-    return std::move(awaitable).UnwrapOrCancel();
+    return awaitable.Move().UnwrapOrCancel();
 }
 
 export template<typename Ret>
 auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::UnwrapOrDefaultType) {
-    return std::move(awaitable).UnwrapOrDefault();
+    return awaitable.Move().UnwrapOrDefault();
 }
 
 export template<typename Ret, typename T>
 auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::UnwrapOrType<T> unwrapOrType) {
-    return std::move(awaitable).UnwrapOr(std::move(unwrapOrType.provider));
+    return awaitable.Move().UnwrapOr(std::move(unwrapOrType.provider));
 }
