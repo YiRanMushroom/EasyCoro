@@ -253,8 +253,45 @@ namespace EasyCoro {
 
     Awaitable<void> Sleep(auto duration);
 
+    template<typename Ret>
+    struct InjectBase {
+        template<typename E = std::exception, std::invocable<E &> Fn>
+        auto Catch(this Awaitable<Ret> self,
+                   Fn catchFunction) -> Awaitable<std::conditional_t<std::is_same_v<Ret, void>,
+            std::conditional_t<std::is_same_v<void, std::invoke_result_t<Fn, E &>>, Unit,
+                std::optional<std::invoke_result_t<Fn, E &>>>,
+            std::conditional_t<std::is_same_v<Ret,
+                    std::invoke_result_t<Fn, E &>>, Ret,
+                std::conditional_t<std::is_same_v<std::invoke_result_t<Fn, E &>, void>,
+                    std::optional<Ret>,
+                    std::variant<Ret,
+                        std::invoke_result_t<Fn, E &>>>
+            >>>;
+    };
+
+    template<typename Ret>
+    struct InjectUnwraps : InjectBase<Ret> {};
+
+    template<typename Ret> requires requires(Ret ret) {
+        { static_cast<bool>(ret) } -> std::convertible_to<bool>;
+        { *ret } -> std::convertible_to<typename Ret::value_type>;
+    }
+    class InjectUnwraps<Ret> {
+    public:
+        auto UnwrapOrCancel(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type>;
+
+        template<typename Provider>
+        auto UnwrapOr(this Awaitable<Ret> self, Provider provider) -> Awaitable<typename Ret::value_type>;
+
+        auto UnwrapOrDefault(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type>;
+
+        auto Unwrap(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type>;
+
+        auto UnwrapOrThrow(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type>;
+    };
+
     export template<>
-    class Awaitable<void> {
+    class Awaitable<void> : public InjectUnwraps<void> {
     public:
         using ReturnType = Unit;
 
@@ -348,27 +385,6 @@ namespace EasyCoro {
         inline auto WithTimeOut(this Awaitable self, Duration duration) -> Awaitable;
 
         // Awaitable CaptureEnabled(this Awaitable self);
-    };
-
-    template<typename Ret>
-    class InjectUnwraps {};
-
-    template<typename Ret> requires requires(Ret ret) {
-        { static_cast<bool>(ret) } -> std::convertible_to<bool>;
-        { *ret } -> std::convertible_to<typename Ret::value_type>;
-    }
-    class InjectUnwraps<Ret> {
-    public:
-        auto UnwrapOrCancel(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type>;
-
-        template<typename Provider>
-        auto UnwrapOr(this Awaitable<Ret> self, Provider provider) -> Awaitable<typename Ret::value_type>;
-
-        auto UnwrapOrDefault(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type>;
-
-        auto Unwrap(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type>;
-
-        auto UnwrapOrThrow(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type>;
     };
 
     template<typename Ret>
@@ -882,6 +898,56 @@ namespace EasyCoro {
         );
     }
 
+    template<typename Ret>
+    template<typename E, std::invocable<E &> Fn>
+    auto InjectBase<Ret>::Catch(this Awaitable<Ret> self,
+                                Fn catchFunction) -> Awaitable<
+        std::conditional_t<std::is_same_v<Ret, void>,
+            std::conditional_t<std::is_same_v<void, std::invoke_result_t<Fn, E &>>, Unit,
+                std::optional<std::invoke_result_t<Fn, E &>>>,
+            std::conditional_t<std::is_same_v<Ret,
+                    std::invoke_result_t<Fn, E &>>, Ret,
+                std::conditional_t<std::is_same_v<std::invoke_result_t<Fn, E &>, void>,
+                    std::optional<Ret>,
+                    std::variant<Ret,
+                        std::invoke_result_t<Fn, E &>>>
+            >>> {
+        using returnType = std::conditional_t<std::is_same_v<Ret, void>,
+            std::conditional_t<std::is_same_v<void, std::invoke_result_t<Fn, E &>>, Unit,
+                std::optional<std::invoke_result_t<Fn, E &>>>,
+            std::conditional_t<std::is_same_v<Ret,
+                    std::invoke_result_t<Fn, E &>>, Ret,
+                std::conditional_t<std::is_same_v<std::invoke_result_t<Fn, E &>, void>,
+                    std::optional<Ret>,
+                    std::variant<Ret,
+                        std::invoke_result_t<Fn, E &>>>
+            >>;
+        try {
+            if constexpr (std::is_same_v<Ret, void>) {
+                co_await self.Move();
+                co_return returnType{};
+            } else {
+                co_return returnType{co_await self.Move()};
+            }
+        } catch (E &e) {
+            if constexpr (std::is_same_v<Ret, std::invoke_result_t<Fn, E &>>) {
+                if constexpr (std::is_same_v<void, std::invoke_result_t<Fn, E &>>) {
+                    catchFunction(e);
+                    co_return returnType{};
+                } else {
+                    co_return returnType{catchFunction(e)};
+                }
+            } else {
+                if constexpr (std::is_same_v<void, std::invoke_result_t<Fn, E &>>) {
+                    catchFunction(e);
+                    co_return returnType{std::nullopt};
+                } else {
+                    co_return returnType{catchFunction(e)};
+                }
+            }
+        }
+    }
+
     template<typename Ret> requires requires(Ret ret) {
         { static_cast<bool>(ret) } -> std::convertible_to<bool>; {
             *ret
@@ -971,6 +1037,7 @@ namespace EasyCoro {
         throw std::runtime_error(std::format("Attempted to unwrap an empty {} in Awaitable",
                                              typeid(Ret).name()));
     }
+
 
     template<typename Ret>
     Awaitable<Ret>::Awaitable(std::coroutine_handle<PromiseType> handle) : m_MyHandlePtr(
@@ -1334,6 +1401,22 @@ namespace EasyCoro {
     export constexpr WithTimeOutType WithTimeOut(std::chrono::milliseconds duration) {
         return WithTimeOutType{duration};
     }
+
+    export template<typename E, std::invocable<E &> Fn>
+    struct CatchType {
+        Fn catchFunction;
+    };
+
+    export template<typename E, std::invocable<E &> Fn>
+    constexpr auto Catch(Fn catchFunction) {
+        return CatchType<E, Fn>{std::move(catchFunction)};
+    }
+
+    export struct UnwrapOrThrowType {};
+
+    export constexpr UnwrapOrThrowType UnwrapOrThrow() {
+        return UnwrapOrThrowType{};
+    }
 }
 
 export template<typename Ret>
@@ -1364,4 +1447,14 @@ auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::UnwrapOrType<T> un
 export template<typename Ret>
 auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::WithTimeOutType withTimeOutType) {
     return awaitable.Move().WithTimeOut(withTimeOutType.Duration);
+}
+
+export template<typename Ret, typename E, std::invocable<E &> Fn>
+auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::CatchType<E, Fn> catchType) {
+    return awaitable.Move().template Catch<E>(std::move(catchType.catchFunction));
+}
+
+export template<typename Ret>
+auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::UnwrapOrThrowType) {
+    return awaitable.Move().UnwrapOrThrow();
 }

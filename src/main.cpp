@@ -117,77 +117,90 @@ int main() {
         std::string example2 = "Example string 2";
         std::string example3 = "Example string 3";
 
-
         try {
             auto now = std::chrono::high_resolution_clock::now();
             for (int i = 0; i < 10000; ++i) {
                 auto future = context.Async(Sleep(0) >> SleepPtr >> SleepPtr
-                                && (Sleep(0) >> SleepPtr >> SleepPtr || EasyCoro::Pull(
-                                        [] -> EasyCoro::Awaitable<std::optional<size_t>> {
-                                            if (rand() % 2 == 0) {
-                                                co_return std::nullopt;
-                                            }
-                                            co_return std::nullopt;
-                                        })
-                                    >> EasyCoro::UnwrapOr([] { return rand(); })
-                                    >> [&](size_t value) -> EasyCoro::Awaitable<std::string> {
-                                        static std::atomic_size_t localCounter = 0;
-                                        ++localCounter;
-                                        static EasyCoro::Finally report([&] {
-                                            std::cout << std::format("Local counter: {}\n", localCounter.load());
-                                        });
-
-                                        std::cout << std::format("Value from random coroutine: {}\n", value);
-
-                                        EasyCoro::Awaitable<std::optional<int>> generator = [](int time)
-                                            -> EasyCoro::Awaitable<std::optional<int>> {
-                                                    while (true) {
-                                                        int thisTime = time--;
-                                                        if (thisTime > 0) {
-                                                            co_yield thisTime;
-                                                        } else {
+                                            && (Sleep(0) >> SleepPtr >> SleepPtr || EasyCoro::Pull(
+                                                    [] -> EasyCoro::Awaitable<std::optional<size_t>> {
+                                                        if (rand() % 2 == 0) {
                                                             co_return std::nullopt;
                                                         }
+                                                        co_return std::nullopt;
+                                                    })
+                                                >> EasyCoro::UnwrapOrThrow()
+                                                >> EasyCoro::Catch<std::exception>([](std::exception &e) {
+                                                    std::cout << std::format(
+                                                        "Caught exception in AnyOf branch: {}\n", e.what());
+                                                })
+                                                >> [&](
+                                            std::optional<size_t> value) -> EasyCoro::Awaitable<std::string> {
+                                                    static std::atomic_size_t localCounter = 0;
+                                                    ++localCounter;
+                                                    static EasyCoro::Finally report([&] {
+                                                        std::cout << std::format(
+                                                            "Local counter: {}\n", localCounter.load());
+                                                    });
+
+                                                    std::cout << std::format(
+                                                        "Value from random coroutine: {}\n",
+                                                        value ? std::to_string(*value) : "Unit");
+
+                                                    EasyCoro::Awaitable<std::optional<int>> generator = [](int time)
+                                                        -> EasyCoro::Awaitable<std::optional<int>> {
+                                                                while (true) {
+                                                                    int thisTime = time--;
+                                                                    if (thisTime > 0) {
+                                                                        co_yield thisTime;
+                                                                    } else {
+                                                                        co_return std::nullopt;
+                                                                    }
+                                                                }
+                                                            }(10);
+
+                                                    while (true) {
+                                                        auto val = co_await generator;
+                                                        if (!val.has_value()) break;
+                                                        std::cout << std::format("Generator yielded: {}\n", *val);
                                                     }
-                                                }(10);
 
-                                        while (true) {
-                                            auto val = co_await generator;
-                                            if (!val.has_value()) break;
-                                            std::cout << std::format("Generator yielded: {}\n", *val);
-                                        }
+                                                    co_await (
+                                                        EasyCoro::Pull(
+                                                            EasyCoro::TryUntilHasValue(
+                                                                GetConsoleInput, std::chrono::milliseconds(0)))
+                                                        .WithTimeOut(std::chrono::milliseconds(0))
+                                                        .UnwrapOr("Default Value") || EasyCoro::Pull(
+                                                            EasyCoro::TryUntilHasValue(
+                                                                GetConsoleInput, std::chrono::milliseconds(10)))
+                                                        .WithTimeOut(std::chrono::milliseconds(0))
+                                                        .UnwrapOr("Default Value") || EasyCoro::Pull(
+                                                            EasyCoro::TryUntilHasValue(
+                                                                GetConsoleInput, std::chrono::milliseconds(10)))
+                                                        .WithTimeOut(std::chrono::milliseconds(0))
+                                                        .UnwrapOr("Default Value"));
 
-                                        co_await (
-                                            EasyCoro::Pull(
-                                                EasyCoro::TryUntilHasValue(
-                                                    GetConsoleInput, std::chrono::milliseconds(0)))
-                                            .WithTimeOut(std::chrono::milliseconds(0))
-                                            .UnwrapOr("Default Value") || EasyCoro::Pull(
-                                                EasyCoro::TryUntilHasValue(
-                                                    GetConsoleInput, std::chrono::milliseconds(10)))
-                                            .WithTimeOut(std::chrono::milliseconds(0))
-                                            .UnwrapOr("Default Value") || EasyCoro::Pull(
-                                                EasyCoro::TryUntilHasValue(
-                                                    GetConsoleInput, std::chrono::milliseconds(10)))
-                                            .WithTimeOut(std::chrono::milliseconds(0))
-                                            .UnwrapOr("Default Value"));
-
-                                        co_return co_await
-                                                EasyCoro::Pull(
-                                                    EasyCoro::TryUntilHasValue(
-                                                        GetConsoleInput, std::chrono::milliseconds(10)))
-                                                .WithTimeOut(std::chrono::milliseconds(0))
-                                                .UnwrapOr("Default Value");
-                                    }
-                                    >> EasyCoro::AsynchronousOf([](std::string str) {
-                                        std::cout << std::format("Processing string asynchronously: {}\n", str);
-                                        return std::make_unique<std::string>(std::move(str));
-                                    })
-                                    >> [](auto thing) -> EasyCoro::Awaitable<void> {
-                                        std::cout << std::format("Completed AnyOf {}\n", *thing);
-                                        co_return;
-                                    }
-                                    >> EasyCoro::Cancellable(false)));
+                                                    co_return co_await
+                                                            EasyCoro::Pull(
+                                                                EasyCoro::TryUntilHasValue(
+                                                                    GetConsoleInput, std::chrono::milliseconds(10)))
+                                                            .WithTimeOut(std::chrono::milliseconds(0))
+                                                            .UnwrapOr("Default Value");
+                                                }
+                                                >> EasyCoro::AsynchronousOf([](std::string str) {
+                                                    std::cout << std::format(
+                                                        "Processing string asynchronously: {}\n", str);
+                                                    return std::make_unique<std::string>(std::move(str));
+                                                })
+                                                >> [](auto thing) -> EasyCoro::Awaitable<void> {
+                                                    std::cout << std::format("Completed AnyOf {}\n", *thing);
+                                                    co_return;
+                                                }
+                                                >> EasyCoro::Catch<std::exception>([](std::exception &e) -> size_t {
+                                                    std::cout << std::format(
+                                                        "Caught exception in AnyOf: {}\n", e.what());
+                                                    return 0;
+                                                })
+                                                >> EasyCoro::Cancellable(false)));
                 future.get();
             }
 
@@ -206,13 +219,9 @@ int main() {
 
     // std::cout << "Counter: " << counter.load() << std::endl;
 
-    std::mutex mtx;
-
-    mtx.lock();
 
     std::cout << "Alloc count: " << EasyCoro::g_AllocCount.load() << std::endl;
     std::cout << "Dealloc count: " << EasyCoro::g_DeallocCount.load() << std::endl;
 
-    mtx.unlock();
     std::cout << "Main function completed." << std::endl;
 }
