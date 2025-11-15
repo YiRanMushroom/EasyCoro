@@ -257,16 +257,21 @@ namespace EasyCoro {
     struct InjectBase {
         template<typename E = std::exception, std::invocable<E &> Fn>
         auto Catch(this Awaitable<Ret> self,
-                   Fn catchFunction) -> Awaitable<std::conditional_t<std::is_same_v<Ret, void>,
-            std::conditional_t<std::is_same_v<void, std::invoke_result_t<Fn, E &>>, Unit,
-                std::optional<std::invoke_result_t<Fn, E &>>>,
-            std::conditional_t<std::is_same_v<Ret,
-                    std::invoke_result_t<Fn, E &>>, Ret,
-                std::conditional_t<std::is_same_v<std::invoke_result_t<Fn, E &>, void>,
-                    std::optional<Ret>,
-                    std::variant<Ret,
-                        std::invoke_result_t<Fn, E &>>>
-            >>>;
+                   Fn catchFunction) ->
+            Awaitable<
+                std::conditional_t<
+                    std::is_same_v<Ret, void>,
+                    std::conditional_t<
+                        std::is_same_v<void, std::invoke_result_t<Fn, E &>>,
+                        Unit,
+                        std::optional<std::invoke_result_t<Fn, E &>>>,
+                    std::conditional_t<
+                        std::is_same_v<Ret, std::invoke_result_t<Fn, E &>>,
+                        Ret,
+                        std::conditional_t<
+                            std::is_same_v<std::invoke_result_t<Fn, E &>, void>,
+                            std::optional<Ret>,
+                            std::variant<Ret, std::invoke_result_t<Fn, E &>>>>>>;
     };
 
     template<typename Ret>
@@ -901,27 +906,34 @@ namespace EasyCoro {
     template<typename Ret>
     template<typename E, std::invocable<E &> Fn>
     auto InjectBase<Ret>::Catch(this Awaitable<Ret> self,
-                                Fn catchFunction) -> Awaitable<
-        std::conditional_t<std::is_same_v<Ret, void>,
-            std::conditional_t<std::is_same_v<void, std::invoke_result_t<Fn, E &>>, Unit,
+                                Fn catchFunction) ->
+        Awaitable<
+            std::conditional_t<
+                std::is_same_v<Ret, void>,
+                std::conditional_t<
+                    std::is_same_v<void, std::invoke_result_t<Fn, E &>>,
+                    Unit,
+                    std::optional<std::invoke_result_t<Fn, E &>>>,
+                std::conditional_t<
+                    std::is_same_v<Ret, std::invoke_result_t<Fn, E &>>,
+                    Ret,
+                    std::conditional_t<
+                        std::is_same_v<std::invoke_result_t<Fn, E &>, void>,
+                        std::optional<Ret>,
+                        std::variant<Ret, std::invoke_result_t<Fn, E &>>>>>> {
+        using returnType = std::conditional_t<
+            std::is_same_v<Ret, void>,
+            std::conditional_t<
+                std::is_same_v<void, std::invoke_result_t<Fn, E &>>,
+                Unit,
                 std::optional<std::invoke_result_t<Fn, E &>>>,
-            std::conditional_t<std::is_same_v<Ret,
-                    std::invoke_result_t<Fn, E &>>, Ret,
-                std::conditional_t<std::is_same_v<std::invoke_result_t<Fn, E &>, void>,
+            std::conditional_t<
+                std::is_same_v<Ret, std::invoke_result_t<Fn, E &>>,
+                Ret,
+                std::conditional_t<
+                    std::is_same_v<std::invoke_result_t<Fn, E &>, void>,
                     std::optional<Ret>,
-                    std::variant<Ret,
-                        std::invoke_result_t<Fn, E &>>>
-            >>> {
-        using returnType = std::conditional_t<std::is_same_v<Ret, void>,
-            std::conditional_t<std::is_same_v<void, std::invoke_result_t<Fn, E &>>, Unit,
-                std::optional<std::invoke_result_t<Fn, E &>>>,
-            std::conditional_t<std::is_same_v<Ret,
-                    std::invoke_result_t<Fn, E &>>, Ret,
-                std::conditional_t<std::is_same_v<std::invoke_result_t<Fn, E &>, void>,
-                    std::optional<Ret>,
-                    std::variant<Ret,
-                        std::invoke_result_t<Fn, E &>>>
-            >>;
+                    std::variant<Ret, std::invoke_result_t<Fn, E &>>>>>;
         try {
             if constexpr (std::is_same_v<Ret, void>) {
                 co_await self.Move();
