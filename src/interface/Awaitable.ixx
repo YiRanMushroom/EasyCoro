@@ -6,7 +6,8 @@ import <cassert>;
 import <cstddef>;
 
 namespace EasyCoro {
-    struct IntoType {};
+    struct IntoType {
+    };
 
     export constexpr IntoType Into{};
 
@@ -39,7 +40,8 @@ namespace EasyCoro {
 
         Finally &operator=(const Finally &) = delete;
 
-        Finally(Fn f) : func(std::move(f)) {}
+        Finally(Fn f) : func(std::move(f)) {
+        }
 
         ~Finally() {
             func();
@@ -54,7 +56,8 @@ namespace EasyCoro {
 
         AwaitToDo &operator=(const AwaitToDo &) = delete;
 
-        AwaitToDo(Fn f) : func(std::move(f)) {}
+        AwaitToDo(Fn f) : func(std::move(f)) {
+        }
 
         void await_suspend(std::coroutine_handle<> handle) {
             func(handle);
@@ -69,28 +72,35 @@ namespace EasyCoro {
 
         AwaitToDoImmediate &operator=(const AwaitToDoImmediate &) = delete;
 
-        AwaitToDoImmediate(Fn f) : func(std::move(f)) {}
+        AwaitToDoImmediate(Fn f) : func(std::move(f)) {
+        }
     };
 
-    export struct Unit {};
+    export struct Unit {
+    };
 
     export class ExecutionContext;
 
     export std::atomic_size_t g_AllocCount = 0;
     export std::atomic_size_t g_DeallocCount = 0;
 
-    export struct UseStandardExecutionContext {};
+    export struct UseStandardExecutionContext {
+    };
 
     class ExecutionContext {
     public:
         ExecutionContext(size_t threadCount = std::jthread::hardware_concurrency() * 2)
             : m_ThreadPool{
-                SharedThreadPool::Create(threadCount, [this] {}, [] {})
-            } {}
+                SharedThreadPool::Create(threadCount, [this] {
+                }, [] {
+                })
+            } {
+        }
 
         ExecutionContext(UseStandardExecutionContext) : m_ThreadPool{
             StandardThreadPool::Create()
-        } {}
+        } {
+        }
 
         void Schedule(std::shared_ptr<void> handle);
 
@@ -272,16 +282,34 @@ namespace EasyCoro {
                             std::is_same_v<std::invoke_result_t<Fn, E &>, void>,
                             std::optional<Ret>,
                             std::variant<Ret, std::invoke_result_t<Fn, E &>>>>>>;
+
+        template<std::invocable<> Fn>
+        auto Catch(this Awaitable<Ret> self, Fn catchAnyFunction) ->
+            Awaitable<
+                std::conditional_t<
+                    std::is_same_v<Ret, void>,
+                    std::conditional_t<
+                        std::is_same_v<void, std::invoke_result_t<Fn>>,
+                        Unit,
+                        std::optional<std::invoke_result_t<Fn>>>,
+                    std::conditional_t<
+                        std::is_same_v<Ret, std::invoke_result_t<Fn>>,
+                        Ret,
+                        std::conditional_t<
+                            std::is_same_v<std::invoke_result_t<Fn>, void>,
+                            std::optional<Ret>,
+                            std::variant<Ret, std::invoke_result_t<Fn>>>>>>;
     };
 
     template<typename Ret>
-    struct InjectUnwraps : InjectBase<Ret> {};
+    struct InjectUnwraps : InjectBase<Ret> {
+    };
 
     template<typename Ret> requires requires(Ret ret) {
         { static_cast<bool>(ret) } -> std::convertible_to<bool>;
         { *ret } -> std::convertible_to<typename Ret::value_type>;
     }
-    class InjectUnwraps<Ret> {
+    struct InjectUnwraps<Ret>: InjectBase<Ret> {
     public:
         auto UnwrapOrCancel(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type>;
 
@@ -325,7 +353,8 @@ namespace EasyCoro {
 
         Awaitable &operator=(Awaitable &&) = default;
 
-        Awaitable(std::weak_ptr<void> handlePtr) : m_MyHandlePtr(handlePtr.lock()) {}
+        Awaitable(std::weak_ptr<void> handlePtr) : m_MyHandlePtr(handlePtr.lock()) {
+        }
 
         Awaitable Clone() const {
             return {m_MyHandlePtr};
@@ -423,7 +452,8 @@ namespace EasyCoro {
 
         Awaitable &operator=(Awaitable &&) = default;
 
-        Awaitable(std::weak_ptr<void> handlePtr) : m_MyHandlePtr(handlePtr.lock()) {}
+        Awaitable(std::weak_ptr<void> handlePtr) : m_MyHandlePtr(handlePtr.lock()) {
+        }
 
         Awaitable Clone() const {
             return {m_MyHandlePtr};
@@ -960,6 +990,64 @@ namespace EasyCoro {
         }
     }
 
+    template<typename Ret>
+    template<std::invocable<> Fn>
+    auto InjectBase<Ret>::Catch(this Awaitable<Ret> self,
+                                Fn catchAnyFunction) ->
+        Awaitable<
+            std::conditional_t<
+                std::is_same_v<Ret, void>,
+                std::conditional_t<
+                    std::is_same_v<void, std::invoke_result_t<Fn>>,
+                    Unit,
+                    std::optional<std::invoke_result_t<Fn>>>,
+                std::conditional_t<
+                    std::is_same_v<Ret, std::invoke_result_t<Fn>>,
+                    Ret,
+                    std::conditional_t<
+                        std::is_same_v<std::invoke_result_t<Fn>, void>,
+                        std::optional<Ret>,
+                        std::variant<Ret, std::invoke_result_t<Fn>>>>>> {
+        using returnType = std::conditional_t<
+            std::is_same_v<Ret, void>,
+            std::conditional_t<
+                std::is_same_v<void, std::invoke_result_t<Fn>>,
+                Unit,
+                std::optional<std::invoke_result_t<Fn>>>,
+            std::conditional_t<
+                std::is_same_v<Ret, std::invoke_result_t<Fn>>,
+                Ret,
+                std::conditional_t<
+                    std::is_same_v<std::invoke_result_t<Fn>, void>,
+                    std::optional<Ret>,
+                    std::variant<Ret, std::invoke_result_t<Fn>>>>>;
+
+        try {
+            if constexpr (std::is_same_v<Ret, void>) {
+                co_await self.Move();
+                co_return returnType{};
+            } else {
+                co_return returnType{co_await self.Move()};
+            }
+        } catch (...) {
+            if constexpr (std::is_same_v<Ret, std::invoke_result_t<Fn>>) {
+                if constexpr (std::is_same_v<void, std::invoke_result_t<Fn>>) {
+                    catchAnyFunction();
+                    co_return returnType{};
+                } else {
+                    co_return returnType{catchAnyFunction()};
+                }
+            } else {
+                if constexpr (std::is_same_v<void, std::invoke_result_t<Fn>>) {
+                    catchAnyFunction();
+                    co_return returnType{std::nullopt};
+                } else {
+                    co_return returnType{catchAnyFunction()};
+                }
+            }
+        }
+    }
+
     template<typename Ret> requires requires(Ret ret) {
         { static_cast<bool>(ret) } -> std::convertible_to<bool>; {
             *ret
@@ -1378,19 +1466,22 @@ namespace EasyCoro {
         return CancellableType{value};
     }
 
-    struct UnwrapType {};
+    struct UnwrapType {
+    };
 
     export constexpr UnwrapType Unwrap() {
         return UnwrapType{};
     }
 
-    struct UnwrapOrCancelType {};
+    struct UnwrapOrCancelType {
+    };
 
     export constexpr UnwrapOrCancelType UnwrapOrCancel() {
         return UnwrapOrCancelType{};
     }
 
-    struct UnwrapOrDefaultType {};
+    struct UnwrapOrDefaultType {
+    };
 
     export constexpr UnwrapOrDefaultType UnwrapOrDefault() {
         return UnwrapOrDefaultType{};
@@ -1424,7 +1515,18 @@ namespace EasyCoro {
         return CatchType<E, Fn>{std::move(catchFunction)};
     }
 
-    export struct UnwrapOrThrowType {};
+    export template<std::invocable<> Fn>
+    struct CatchAnyType {
+        Fn catchFunction;
+    };
+
+    export template<std::invocable<> Fn>
+    constexpr auto Catch(Fn catchFunction) {
+        return CatchAnyType<Fn>{std::move(catchFunction)};
+    }
+
+    export struct UnwrapOrThrowType {
+    };
 
     export constexpr UnwrapOrThrowType UnwrapOrThrow() {
         return UnwrapOrThrowType{};
@@ -1464,6 +1566,11 @@ auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::WithTimeOutType wi
 export template<typename Ret, typename E, std::invocable<E &> Fn>
 auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::CatchType<E, Fn> catchType) {
     return awaitable.Move().template Catch<E>(std::move(catchType.catchFunction));
+}
+
+export template<typename Ret, std::invocable<> Fn>
+auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::CatchAnyType<Fn> catchAnyType) {
+    return awaitable.Move().Catch(std::move(catchAnyType.catchFunction));
 }
 
 export template<typename Ret>

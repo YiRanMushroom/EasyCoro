@@ -32,7 +32,7 @@ namespace EasyCoro {
                 });
 
             std::future<ReturnType> res = task->get_future();
-            EnqueueFunc([task]() { (*task)(); });
+            EnqueueFunc([task] { (*task)(); });
             return res;
         }
 
