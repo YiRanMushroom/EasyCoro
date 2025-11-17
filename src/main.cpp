@@ -146,17 +146,18 @@ int main() {
                                                         "Value from random coroutine: {}\n",
                                                         value ? std::to_string(*value) : "Unit");
 
-                                                    EasyCoro::Awaitable<std::optional<int>> generator = [](int time)
+                                                    EasyCoro::Awaitable<std::optional<int>> generator
+                                                            = [time = 10](this auto self)
                                                         -> EasyCoro::Awaitable<std::optional<int>> {
                                                                 while (true) {
-                                                                    int thisTime = time--;
+                                                                    int thisTime = self.time--;
                                                                     if (thisTime > 0) {
                                                                         co_yield thisTime;
                                                                     } else {
                                                                         co_return std::nullopt;
                                                                     }
                                                                 }
-                                                            }(10);
+                                                            }();
 
                                                     while (true) {
                                                         auto val = co_await generator;
@@ -202,9 +203,9 @@ int main() {
                                                     return 0;
                                                 })
                                                 >> EasyCoro::Catch(
-                                                [] {
-                                                    std::cout << "Caught exception in AnyOf (catch all)\n";
-                                                })
+                                                    [] {
+                                                        std::cout << "Caught exception in AnyOf (catch all)\n";
+                                                    })
                                                 >> EasyCoro::Cancellable(false)));
                 future.get();
             }
