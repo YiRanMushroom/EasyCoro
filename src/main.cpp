@@ -93,25 +93,13 @@ struct std::formatter<std::optional<T>> : std::formatter<T> {
     }
 };
 
-template<>
-struct std::formatter<EasyCoro::Unit> {
-    constexpr auto parse(auto &ctx) const { return ctx.begin(); }
-
-    auto format(const EasyCoro::Unit &, auto &ctx) const {
-        return std::format_to(ctx.out(), "Unit");
-    }
-};
-
 int main() {
     std::atomic_size_t counter = 0;
+
     StartConsoleListener();
     // Inner
     {
         EasyCoro::ExecutionContext context(64);
-
-        EasyCoro::Finally f1([&] {
-            context.Join();
-        });
 
         std::string example1 = "Example string 1";
         std::string example2 = "Example string 2";
@@ -135,13 +123,6 @@ int main() {
                                                 })
                                                 >> [&](
                                             std::optional<size_t> value) -> EasyCoro::Awaitable<std::string> {
-                                                    static std::atomic_size_t localCounter = 0;
-                                                    ++localCounter;
-                                                    static EasyCoro::Finally report([&] {
-                                                        std::cout << std::format(
-                                                            "Local counter: {}\n", localCounter.load());
-                                                    });
-
                                                     std::cout << std::format(
                                                         "Value from random coroutine: {}\n",
                                                         value ? std::to_string(*value) : "Unit");
@@ -216,6 +197,8 @@ int main() {
         } catch (const std::exception &ex) {
             std::cerr << "Caught exception: " << ex.what() << std::endl;
         }
+
+        context.Join();
     }
 
     // report memory

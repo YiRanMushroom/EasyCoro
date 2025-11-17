@@ -3,7 +3,6 @@ export module EasyCoro.Awaitable;
 import std;
 import EasyCoro.ThreadPool;
 import <cassert>;
-import <cstddef>;
 
 namespace EasyCoro {
     struct IntoType {
@@ -32,22 +31,6 @@ namespace EasyCoro {
         std::move(t) >> Into;
     };
 
-    export template<typename Fn>
-    struct Finally {
-        Fn func;
-
-        Finally(const Finally &) = delete;
-
-        Finally &operator=(const Finally &) = delete;
-
-        Finally(Fn f) : func(std::move(f)) {
-        }
-
-        ~Finally() {
-            func();
-        }
-    };
-
     template<typename Fn>
     struct AwaitToDo : std::suspend_always {
         Fn func;
@@ -74,9 +57,6 @@ namespace EasyCoro {
 
         AwaitToDoImmediate(Fn f) : func(std::move(f)) {
         }
-    };
-
-    export struct Unit {
     };
 
     export class ExecutionContext;
@@ -231,7 +211,7 @@ namespace EasyCoro {
         template<std::convertible_to<Ret> T>
         void return_value(T &&value);
 
-        void return_value(Unit);
+        void return_value(void);
 
         template<std::convertible_to<Ret> T>
         std::suspend_always yield_value(T &&value);
@@ -273,7 +253,7 @@ namespace EasyCoro {
                     std::is_same_v<Ret, void>,
                     std::conditional_t<
                         std::is_same_v<void, std::invoke_result_t<Fn, E &>>,
-                        Unit,
+                        void,
                         std::optional<std::invoke_result_t<Fn, E &>>>,
                     std::conditional_t<
                         std::is_same_v<Ret, std::invoke_result_t<Fn, E &>>,
@@ -290,7 +270,7 @@ namespace EasyCoro {
                     std::is_same_v<Ret, void>,
                     std::conditional_t<
                         std::is_same_v<void, std::invoke_result_t<Fn>>,
-                        Unit,
+                        void,
                         std::optional<std::invoke_result_t<Fn>>>,
                     std::conditional_t<
                         std::is_same_v<Ret, std::invoke_result_t<Fn>>,
@@ -326,7 +306,7 @@ namespace EasyCoro {
     export template<>
     class Awaitable<void> : public InjectUnwraps<void> {
     public:
-        using ReturnType = Unit;
+        using ReturnType = std::monostate;
 
         using PromiseType = PromiseType<void>;
         using promise_type = PromiseType;
@@ -408,9 +388,9 @@ namespace EasyCoro {
             return GetMyHandle().promise().IsCancelled;
         }
 
-        Unit GetResult();
+        std::monostate GetResult();
 
-        std::optional<Unit> TryGetResult();
+        std::optional<std::monostate> TryGetResult();
 
         template<typename Func>
         inline auto Then(this Awaitable self, Func &&func) -> std::invoke_result_t<Func>;
@@ -680,7 +660,7 @@ namespace EasyCoro {
     }
 
     template<typename Ret>
-    void PromiseType<Ret>::return_value(Unit) {
+    void PromiseType<Ret>::return_value(void) {
         if (!IsCancelled) {
             throw std::runtime_error("Cannot return void from non-void coroutine which is not canceled");
         }
@@ -769,14 +749,14 @@ namespace EasyCoro {
         }
     }
 
-    Unit Awaitable<void>::GetResult() {
+    std::monostate Awaitable<void>::GetResult() {
         auto handle = GetMyHandle();
 
         std::lock_guard lock(handle.promise().ResultProtectMutex);
         auto &variant = handle.promise().Result;
         switch (variant.index()) {
             case 0:
-                return Unit{};
+                return {};
             case 1:
                 std::rethrow_exception(std::get<std::exception_ptr>(variant));
             default:
@@ -784,9 +764,9 @@ namespace EasyCoro {
         }
     }
 
-    std::optional<Unit> Awaitable<void>::TryGetResult() {
+    std::optional<std::monostate> Awaitable<void>::TryGetResult() {
         if (std::holds_alternative<std::monostate>(GetMyHandle().promise().Result)) {
-            return Unit{};
+            return std::make_optional<std::monostate>();
         }
         if (std::holds_alternative<std::exception_ptr>(GetMyHandle().promise().Result)) {
             std::rethrow_exception(std::get<std::exception_ptr>(GetMyHandle().promise().Result));
@@ -942,7 +922,7 @@ namespace EasyCoro {
                 std::is_same_v<Ret, void>,
                 std::conditional_t<
                     std::is_same_v<void, std::invoke_result_t<Fn, E &>>,
-                    Unit,
+                    void,
                     std::optional<std::invoke_result_t<Fn, E &>>>,
                 std::conditional_t<
                     std::is_same_v<Ret, std::invoke_result_t<Fn, E &>>,
@@ -955,7 +935,7 @@ namespace EasyCoro {
             std::is_same_v<Ret, void>,
             std::conditional_t<
                 std::is_same_v<void, std::invoke_result_t<Fn, E &>>,
-                Unit,
+                void,
                 std::optional<std::invoke_result_t<Fn, E &>>>,
             std::conditional_t<
                 std::is_same_v<Ret, std::invoke_result_t<Fn, E &>>,
@@ -999,7 +979,7 @@ namespace EasyCoro {
                 std::is_same_v<Ret, void>,
                 std::conditional_t<
                     std::is_same_v<void, std::invoke_result_t<Fn>>,
-                    Unit,
+                    void,
                     std::optional<std::invoke_result_t<Fn>>>,
                 std::conditional_t<
                     std::is_same_v<Ret, std::invoke_result_t<Fn>>,
@@ -1012,7 +992,7 @@ namespace EasyCoro {
             std::is_same_v<Ret, void>,
             std::conditional_t<
                 std::is_same_v<void, std::invoke_result_t<Fn>>,
-                Unit,
+                void,
                 std::optional<std::invoke_result_t<Fn>>>,
             std::conditional_t<
                 std::is_same_v<Ret, std::invoke_result_t<Fn>>,
@@ -1068,7 +1048,7 @@ namespace EasyCoro {
             }
         };
 
-        co_return Unit{};
+        co_return;
     }
 
     template<typename Ret> requires requires(Ret ret) {
