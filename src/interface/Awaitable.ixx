@@ -289,7 +289,7 @@ namespace EasyCoro {
         { static_cast<bool>(ret) } -> std::convertible_to<bool>;
         { *ret } -> std::convertible_to<typename Ret::value_type>;
     }
-    struct InjectUnwraps<Ret>: InjectBase<Ret> {
+    struct InjectUnwraps<Ret> : InjectBase<Ret> {
     public:
         auto UnwrapOrCancel(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type>;
 
@@ -820,7 +820,7 @@ namespace EasyCoro {
 
         (awaitables.Reset(), ...);
 
-        co_return result;
+        co_return std::move(result);
     }
 
     export template<typename... Tps>
@@ -872,13 +872,13 @@ namespace EasyCoro {
 
         (awaitables.Reset(), ...);
 
-        co_return result;
+        co_return std::move(result);
     }
 
 
     export template<typename T>
     Awaitable<T> StartWith(T value) {
-        co_return value;
+        co_return std::move(value);
     }
 
     export template<typename Func>
@@ -1029,9 +1029,8 @@ namespace EasyCoro {
     }
 
     template<typename Ret> requires requires(Ret ret) {
-        { static_cast<bool>(ret) } -> std::convertible_to<bool>; {
-            *ret
-        } -> std::convertible_to<typename Ret::value_type>;
+        { static_cast<bool>(ret) } -> std::convertible_to<bool>;
+        { *ret } -> std::convertible_to<typename Ret::value_type>;
     }
     auto InjectUnwraps<Ret>::
     UnwrapOrCancel(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type> {
@@ -1052,9 +1051,8 @@ namespace EasyCoro {
     }
 
     template<typename Ret> requires requires(Ret ret) {
-        { static_cast<bool>(ret) } -> std::convertible_to<bool>; {
-            *ret
-        } -> std::convertible_to<typename Ret::value_type>;
+        { static_cast<bool>(ret) } -> std::convertible_to<bool>;
+        { *ret } -> std::convertible_to<typename Ret::value_type>;
     }
     template<typename Provider>
     auto InjectUnwraps<Ret>::UnwrapOr(this Awaitable<Ret> self,
@@ -1065,7 +1063,7 @@ namespace EasyCoro {
         }
 
         if constexpr (std::convertible_to<Provider, typename Ret::value_type>) {
-            co_return provider;
+            co_return std::move(provider);
         } else if constexpr (std::convertible_to<std::invoke_result_t<Provider>, typename
             Ret::value_type>) {
             co_return provider();
@@ -1081,9 +1079,8 @@ namespace EasyCoro {
     }
 
     template<typename Ret> requires requires(Ret ret) {
-        { static_cast<bool>(ret) } -> std::convertible_to<bool>; {
-            *ret
-        } -> std::convertible_to<typename Ret::value_type>;
+        { static_cast<bool>(ret) } -> std::convertible_to<bool>;
+        { *ret } -> std::convertible_to<typename Ret::value_type>;
     }
     auto InjectUnwraps<Ret>::UnwrapOrDefault(
         this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type> {
@@ -1095,18 +1092,16 @@ namespace EasyCoro {
     }
 
     template<typename Ret> requires requires(Ret ret) {
-        { static_cast<bool>(ret) } -> std::convertible_to<bool>; {
-            *ret
-        } -> std::convertible_to<typename Ret::value_type>;
+        { static_cast<bool>(ret) } -> std::convertible_to<bool>;
+        { *ret } -> std::convertible_to<typename Ret::value_type>;
     }
     auto InjectUnwraps<Ret>::Unwrap(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type> {
         co_return *co_await self.Move();
     }
 
     template<typename Ret> requires requires(Ret ret) {
-        { static_cast<bool>(ret) } -> std::convertible_to<bool>; {
-            *ret
-        } -> std::convertible_to<typename Ret::value_type>;
+        { static_cast<bool>(ret) } -> std::convertible_to<bool>;
+        { *ret } -> std::convertible_to<typename Ret::value_type>;
     }
     auto InjectUnwraps<Ret>::
     UnwrapOrThrow(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type> {
@@ -1236,7 +1231,7 @@ namespace EasyCoro {
                             }(std::move(self.func), std::forward<Args>(args)...);
 
                     if (value) {
-                        co_return *value;
+                        co_return std::move(*value);
                     }
 
                     self.func = std::move(func);
@@ -1250,7 +1245,7 @@ namespace EasyCoro {
                             }(self.func, std::forward<Args>(args)...);
 
                     if (value) {
-                        co_return *value;
+                        co_return std::move(*value);
                     }
                 }
 
@@ -1288,7 +1283,7 @@ namespace EasyCoro {
                 std::move(self.values));
         }
 
-        AllOfType &&Move() {
+        AllOfType Move() {
             return std::move(*this);
         }
     };
@@ -1305,7 +1300,7 @@ namespace EasyCoro {
                 std::move(self.values));
         }
 
-        AnyOfType &&Move() {
+        AnyOfType Move() {
             return std::move(*this);
         }
     };
