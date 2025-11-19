@@ -246,6 +246,7 @@ namespace EasyCoro {
     template<typename Ret>
     struct InjectBase {
         template<typename E = std::exception, std::invocable<E &> Fn>
+        requires !std::invocable<Fn>
         auto Catch(this Awaitable<Ret> self,
                    Fn catchFunction) ->
             Awaitable<
@@ -915,6 +916,7 @@ namespace EasyCoro {
 
     template<typename Ret>
     template<typename E, std::invocable<E &> Fn>
+    requires !std::invocable<Fn>
     auto InjectBase<Ret>::Catch(this Awaitable<Ret> self,
                                 Fn catchFunction) ->
         Awaitable<
@@ -1545,7 +1547,7 @@ auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::CatchType<E, Fn> c
 
 export template<typename Ret, std::invocable<> Fn>
 auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::CatchAnyType<Fn> catchAnyType) {
-    return awaitable.Move().Catch(std::move(catchAnyType.catchFunction));
+    return awaitable.Move().template Catch<Fn>(std::move(catchAnyType.catchFunction));
 }
 
 export template<typename Ret>

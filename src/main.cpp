@@ -178,13 +178,13 @@ int main() {
                                                     throw 1;
                                                     co_return;
                                                 }
-                                                >> EasyCoro::Catch<std::exception>([](std::exception &e) -> size_t {
+                                                >> EasyCoro::Catch<std::exception&>([](std::exception &e) -> size_t {
                                                     std::cout << std::format(
                                                         "Caught exception in AnyOf: {}\n", e.what());
                                                     return 0;
                                                 })
                                                 >> EasyCoro::Catch(
-                                                    [] {
+                                                    [](auto......) {
                                                         std::cout << "Caught exception in AnyOf (catch all)\n";
                                                     })
                                                 >> EasyCoro::Cancellable(false)));
