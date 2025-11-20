@@ -1239,7 +1239,7 @@ namespace EasyCoro {
                         std::is_same_v<InvokeResultOfException<Fn, E>, void>,
                         std::optional<Ret>,
                         std::variant<Ret, InvokeResultOfException<Fn, E>>>>>> {
-        using returnType = std::conditional_t<
+        using ReturnType = std::conditional_t<
             std::is_same_v<Ret, void>,
             std::conditional_t<
                 std::is_same_v<void, InvokeResultOfException<Fn, E>>,
@@ -1253,6 +1253,43 @@ namespace EasyCoro {
                     std::optional<Ret>,
                     std::variant<Ret, InvokeResultOfException<Fn, E>>>>>;
 
+        /*
+        using ReturnType =
+                std::conditional_t<
+                    std::is_same_v<Ret, void>,
+                    std::conditional_t<
+                        std::is_same_v<void, std::invoke_result_t<Fn,
+                            std::conditional_t<
+                                std::is_same_v<std::exception, std::remove_cvref_t<E>>,
+                                typename TypeTraits::FunctionTraitInfo<Fn>::
+                                template ArgumentTypeOrDefault<0, std::exception &>, E &>>>,
+                        void,
+                        std::optional<std::invoke_result_t<Fn,
+                            std::conditional_t<
+                                std::is_same_v<std::exception, std::remove_cvref_t<E>>,
+                                typename TypeTraits::FunctionTraitInfo<Fn>::
+                                template ArgumentTypeOrDefault<0, std::exception &>, E &>>>>,
+                    std::conditional_t<
+                        std::is_same_v<Ret, std::invoke_result_t<Fn,
+                            std::conditional_t<
+                                std::is_same_v<std::exception, std::remove_cvref_t<E>>,
+                                typename TypeTraits::FunctionTraitInfo<Fn>::
+                                template ArgumentTypeOrDefault<0, std::exception &>, E &>>>,
+                        Ret,
+                        std::conditional_t<
+                            std::is_same_v<std::invoke_result_t<Fn,
+                                std::conditional_t<
+                                    std::is_same_v<std::exception, std::remove_cvref_t<E>>,
+                                    typename TypeTraits::FunctionTraitInfo<Fn>::
+                                    template ArgumentTypeOrDefault<0, std::exception &>, E &>>, void>,
+                            std::optional<Ret>,
+                            std::variant<Ret, std::invoke_result_t<Fn,
+                                std::conditional_t<
+                                    std::is_same_v<std::exception, std::remove_cvref_t<E>>,
+                                    typename TypeTraits::FunctionTraitInfo<Fn>::
+                                    template ArgumentTypeOrDefault<0, std::exception &>, E &>>>>>>;
+         */
+
         using ActualCatchReferenceType =
                 std::conditional_t<std::is_same_v<std::exception, std::remove_cvref_t<E>>,
                     typename TypeTraits::FunctionTraitInfo<Fn>::
@@ -1265,24 +1302,24 @@ namespace EasyCoro {
         try {
             if constexpr (std::is_same_v<Ret, void>) {
                 co_await self.Move();
-                co_return returnType{};
+                co_return ReturnType{};
             } else {
-                co_return returnType{co_await self.Move()};
+                co_return ReturnType{co_await self.Move()};
             }
         } catch (ActualCatchReferenceType e) {
             if constexpr (std::is_same_v<Ret, InvokeResultOfException<Fn, E>>) {
                 if constexpr (std::is_same_v<void, InvokeResultOfException<Fn, E>>) {
                     catchFunction(e);
-                    co_return returnType{};
+                    co_return ReturnType{};
                 } else {
-                    co_return returnType{catchFunction(e)};
+                    co_return ReturnType{catchFunction(e)};
                 }
             } else {
                 if constexpr (std::is_same_v<void, InvokeResultOfException<Fn, E>>) {
                     catchFunction(e);
-                    co_return returnType{std::nullopt};
+                    co_return ReturnType{std::nullopt};
                 } else {
-                    co_return returnType{catchFunction(e)};
+                    co_return ReturnType{catchFunction(e)};
                 }
             }
         }
@@ -1306,7 +1343,7 @@ namespace EasyCoro {
                         std::is_same_v<std::invoke_result_t<Fn>, void>,
                         std::optional<Ret>,
                         std::variant<Ret, std::invoke_result_t<Fn>>>>>> {
-        using returnType = std::conditional_t<
+        using ReturnType = std::conditional_t<
             std::is_same_v<Ret, void>,
             std::conditional_t<
                 std::is_same_v<void, std::invoke_result_t<Fn>>,
@@ -1323,24 +1360,24 @@ namespace EasyCoro {
         try {
             if constexpr (std::is_same_v<Ret, void>) {
                 co_await self.Move();
-                co_return returnType{};
+                co_return ReturnType{};
             } else {
-                co_return returnType{co_await self.Move()};
+                co_return ReturnType{co_await self.Move()};
             }
         } catch (...) {
             if constexpr (std::is_same_v<Ret, std::invoke_result_t<Fn>>) {
                 if constexpr (std::is_same_v<void, std::invoke_result_t<Fn>>) {
                     catchAnyFunction();
-                    co_return returnType{};
+                    co_return ReturnType{};
                 } else {
-                    co_return returnType{catchAnyFunction()};
+                    co_return ReturnType{catchAnyFunction()};
                 }
             } else {
                 if constexpr (std::is_same_v<void, std::invoke_result_t<Fn>>) {
                     catchAnyFunction();
-                    co_return returnType{std::nullopt};
+                    co_return ReturnType{std::nullopt};
                 } else {
-                    co_return returnType{catchAnyFunction()};
+                    co_return ReturnType{catchAnyFunction()};
                 }
             }
         }
