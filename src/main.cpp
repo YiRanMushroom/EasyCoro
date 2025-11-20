@@ -191,9 +191,13 @@ int main() {
                                                     // discard all
                                                     co_return;
                                                 }
-                                                >> []() -> EasyCoro::Awaitable<void> {
+                                                >> []() -> int& {
+                                                    static int x = 5;
                                                     std::cout << "This should not be called due to previous catch.\n";
-                                                    co_return;
+                                                    return x;
+                                                }
+                                                >> [](auto&&...) {
+                                                    std::cout << "throw it";
                                                 }
                                                 >> EasyCoro::Cancellable(false)));
                 future.get();
