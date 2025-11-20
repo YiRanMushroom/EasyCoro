@@ -230,18 +230,31 @@ namespace EasyCoro {
                     throw std::runtime_error("Invalid state in coroutine result");
             }
         }
+
+        std::optional<Ret> TryGetResultValue() {
+            std::lock_guard lock(ResultProtectMutex);
+            auto &variant = Result;
+            switch (variant.index()) {
+                case 1:
+                    return std::get<Ret>(std::move(variant));
+                case 2:
+                    std::rethrow_exception(std::get<std::exception_ptr>(std::move(variant)));
+                default:
+                    return std::nullopt;
+            }
+        }
     };
 
     template<typename Ret>
-    struct PromiseType<Ret&> : PromiseBase {
+    struct PromiseType<Ret &> : PromiseBase {
         std::mutex ResultProtectMutex{};
-        std::variant<std::monostate, Ret*, std::exception_ptr> Result{std::monostate{}};
+        std::variant<std::monostate, Ret *, std::exception_ptr> Result{std::monostate{}};
 
         void Cancel() {
             IsCancelled = true;
         }
 
-        Awaitable<Ret&> get_return_object();
+        Awaitable<Ret &> get_return_object();
 
         auto initial_suspend() noexcept {
             return std::suspend_always{};
@@ -252,12 +265,12 @@ namespace EasyCoro {
         }
 
         // co_return can have implicit move
-        template<typename T> requires std::convertible_to<Ret&, T&>
+        template<typename T> requires std::convertible_to<Ret &, T &>
         void return_value(T &value);
 
         void return_value(void);
 
-        template<typename T> requires std::convertible_to<Ret&, T&>
+        template<typename T> requires std::convertible_to<Ret &, T &>
         std::suspend_always yield_value(T &value);
 
         void unhandled_exception();
@@ -267,17 +280,30 @@ namespace EasyCoro {
             auto &variant = Result;
             switch (variant.index()) {
                 case 1:
-                    return *std::get<Ret*>(std::move(variant));
+                    return *std::get<Ret *>(std::move(variant));
                 case 2:
                     std::rethrow_exception(std::get<std::exception_ptr>(std::move(variant)));
                 default:
                     throw std::runtime_error("Invalid state in coroutine result");
             }
         }
+
+        std::optional<std::reference_wrapper<Ret>> TryGetResultValue() {
+            std::lock_guard lock(ResultProtectMutex);
+            auto &variant = Result;
+            switch (variant.index()) {
+                case 1:
+                    return *std::get<Ret *>(std::move(variant));
+                case 2:
+                    std::rethrow_exception(std::get<std::exception_ptr>(std::move(variant)));
+                default:
+                    return nullptr;
+            }
+        }
     };
 
     template<typename Ret>
-    struct PromiseType<Ret&&> {
+    struct PromiseType<Ret &&> {
         static_assert(false, "Returning an rvalue reference is extremely dangerous, return a value instead");
     };
 
@@ -302,12 +328,25 @@ namespace EasyCoro {
 
         void unhandled_exception();
 
-        void GetResultValue() {
+        std::monostate GetResultValue() {
             std::lock_guard lock(ResultProtectMutex);
             auto &variant = Result;
             switch (variant.index()) {
                 case 0:
-                    return;
+                    return {};
+                case 1:
+                    std::rethrow_exception(std::get<std::exception_ptr>(variant));
+                default:
+                    throw std::runtime_error("Invalid state in coroutine result");
+            }
+        }
+
+        std::optional<std::monostate> TryGetResultValue() {
+            std::lock_guard lock(ResultProtectMutex);
+            auto &variant = Result;
+            switch (variant.index()) {
+                case 0:
+                    return std::monostate{};
                 case 1:
                     std::rethrow_exception(std::get<std::exception_ptr>(variant));
                 default:
@@ -504,6 +543,8 @@ namespace EasyCoro {
         using PromiseType = PromiseType<void>;
         using promise_type = PromiseType;
 
+        using OptionalType = std::optional<std::monostate>;
+
         std::shared_ptr<void> m_MyHandlePtr;
 
         const std::shared_ptr<void> &GetHandlePtr() const {
@@ -603,6 +644,11 @@ namespace EasyCoro {
         using PromiseType = PromiseType<Ret>;
         using promise_type = PromiseType;
 
+        using OptionalType = std::conditional_t<
+            std::is_reference_v<Ret>,
+            std::optional<std::reference_wrapper<std::remove_reference_t<Ret>>>,
+            std::optional<Ret>>;
+
         std::shared_ptr<void> m_MyHandlePtr;
 
         const std::shared_ptr<void> &GetHandlePtr() const {
@@ -682,14 +728,14 @@ namespace EasyCoro {
 
         Ret GetResult();
 
-        std::optional<Ret> TryGetResult();
+        OptionalType TryGetResult();
 
         template<typename Func>
         auto Then(this Awaitable self, Func &&func) -> WrapAwaitable<
             std::invoke_result_t<Func, Ret>>::Type;
 
         template<typename Duration = std::chrono::milliseconds>
-        auto WithTimeOut(this Awaitable self, Duration duration) -> Awaitable<std::optional<Ret>>;
+        auto WithTimeOut(this Awaitable self, Duration duration) -> Awaitable<OptionalType>;
 
         // Awaitable CaptureEnabled(this Awaitable self);
     };
@@ -877,14 +923,14 @@ namespace EasyCoro {
     }
 
     template<typename Ret>
-    Awaitable<Ret &> PromiseType<Ret&>::get_return_object() {
+    Awaitable<Ret &> PromiseType<Ret &>::get_return_object() {
         ++g_AllocCount;
         return {std::coroutine_handle<PromiseType>::from_promise(*this)};
     }
 
     template<typename Ret>
-    template<typename T> requires std::convertible_to<Ret&, T&>
-    void PromiseType<Ret&>::return_value(T &value) {
+    template<typename T> requires std::convertible_to<Ret &, T &>
+    void PromiseType<Ret &>::return_value(T &value) {
         // Protect
         {
             std::scoped_lock lock(ResultProtectMutex);
@@ -899,7 +945,7 @@ namespace EasyCoro {
     }
 
     template<typename Ret>
-    void PromiseType<Ret&>::return_value(void) {
+    void PromiseType<Ret &>::return_value(void) {
         if (!IsCancelled) {
             throw std::runtime_error("Cannot return void from non-void coroutine which is not canceled");
         }
@@ -907,8 +953,8 @@ namespace EasyCoro {
     }
 
     template<typename Ret>
-    template<typename T> requires std::convertible_to<Ret&, T&>
-    std::suspend_always PromiseType<Ret&>::yield_value(T &value) {
+    template<typename T> requires std::convertible_to<Ret &, T &>
+    std::suspend_always PromiseType<Ret &>::yield_value(T &value) {
         if (DetachedSelf) {
             DetachedSelf.reset();
             throw std::runtime_error("A generator coroutine must be cancellable");
@@ -929,7 +975,7 @@ namespace EasyCoro {
     }
 
     template<typename Ret>
-    void PromiseType<Ret&>::unhandled_exception() {
+    void PromiseType<Ret &>::unhandled_exception() {
         // Protect
         {
             std::scoped_lock lock(ResultProtectMutex);
@@ -1007,32 +1053,25 @@ namespace EasyCoro {
         //     default:
         //         throw std::runtime_error("Invalid state in coroutine result");
         // }
-        return handle.promise().GetResultValue();
+        handle.promise().GetResultValue();
     }
 
     std::monostate Awaitable<void>::GetResult() {
         auto handle = GetMyHandle();
 
-        std::lock_guard lock(handle.promise().ResultProtectMutex);
-        auto &variant = handle.promise().Result;
-        switch (variant.index()) {
-            case 0:
-                return {};
-            case 1:
-                std::rethrow_exception(std::get<std::exception_ptr>(variant));
-            default:
-                throw std::runtime_error("Invalid state in coroutine result");
-        }
+        return handle.promise().GetResultValue();
     }
 
     std::optional<std::monostate> Awaitable<void>::TryGetResult() {
-        if (std::holds_alternative<std::monostate>(GetMyHandle().promise().Result)) {
-            return std::make_optional<std::monostate>();
-        }
-        if (std::holds_alternative<std::exception_ptr>(GetMyHandle().promise().Result)) {
-            std::rethrow_exception(std::get<std::exception_ptr>(GetMyHandle().promise().Result));
-        }
-        return std::nullopt;
+        // if (std::holds_alternative<std::monostate>(GetMyHandle().promise().Result)) {
+        //     return std::make_optional<std::monostate>();
+        // }
+        // if (std::holds_alternative<std::exception_ptr>(GetMyHandle().promise().Result)) {
+        //     std::rethrow_exception(std::get<std::exception_ptr>(GetMyHandle().promise().Result));
+        // }
+        // return std::nullopt;
+
+        return GetMyHandle().promise().TryGetResultValue();
     }
 
     export template<typename... Tps>
@@ -1085,7 +1124,7 @@ namespace EasyCoro {
     }
 
     export template<typename... Tps>
-    Awaitable<std::tuple<std::optional<typename Awaitable<Tps>::ReturnType>...>> AnyOf(
+    Awaitable<std::tuple<typename Awaitable<Tps>::OptionalType...>> AnyOf(
         Awaitable<Tps>... awaitables) {
         std::shared_ptr<void> parentHandle{};
 
@@ -1448,21 +1487,11 @@ namespace EasyCoro {
     Ret Awaitable<Ret>::GetResult() {
         auto handle = GetMyHandle();
 
-        std::lock_guard lock(handle.promise().ResultProtectMutex);
-        switch (handle.promise().Result.index()) {
-            case 0:
-                throw std::runtime_error("Coroutine did not return a value");
-            case 1:
-                return std::move(std::get<Ret>(handle.promise().Result));
-            case 2:
-                std::rethrow_exception(std::get<std::exception_ptr>(handle.promise().Result));
-            default:
-                throw std::runtime_error("Invalid state in coroutine result");
-        }
+        return handle.promise().GetResultValue();
     }
 
     template<typename Ret>
-    std::optional<Ret> Awaitable<Ret>::TryGetResult() {
+    Awaitable<Ret>::OptionalType Awaitable<Ret>::TryGetResult() {
         if (std::holds_alternative<Ret>(GetMyHandle().promise().Result)) {
             return std::get<Ret>(std::move(GetMyHandle().promise().Result));
         }
@@ -1490,10 +1519,7 @@ namespace EasyCoro {
 
     template<typename Ret>
     template<typename Duration>
-    auto Awaitable<Ret>::WithTimeOut(this Awaitable self,
-                                     Duration duration)
-        ->
-        Awaitable<std::optional<Ret>> {
+    auto Awaitable<Ret>::WithTimeOut(this Awaitable self, Duration duration) -> Awaitable<OptionalType> {
         co_return std::get<0>(co_await AnyOf(
             self.Move(),
             Sleep(duration)
