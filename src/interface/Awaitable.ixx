@@ -243,26 +243,123 @@ namespace EasyCoro {
 
     Awaitable<void> Sleep(auto duration);
 
+    namespace TypeTraits {
+        template<typename>
+        struct FunctionTraitInfo {
+            template<size_t Idx, typename Default>
+            using ArgumentTypeOrDefault = Default;
+
+            template<typename Default>
+            using ReturnTypeOrDefault = Default;
+        };
+
+        template<typename Fn> requires requires { &Fn::operator(); }
+        struct FunctionTraitInfo<Fn> : FunctionTraitInfo<decltype(&Fn::operator())> {
+        };
+
+        template<typename Fn> requires std::is_function_v<Fn>
+        struct FunctionTraitInfo<Fn> : FunctionTraitInfo<std::add_pointer_t<Fn>> {
+        };
+
+        template<typename T, typename Ret, typename... Args>
+        struct FunctionTraitInfo<Ret(T::*)(Args...) const> : FunctionTraitInfo<Ret(*)(Args...)> {
+        };
+
+        template<typename T, typename Ret, typename... Args>
+        struct FunctionTraitInfo<Ret(T::*)(Args...)> : FunctionTraitInfo<Ret(*)(Args...)> {
+        };
+
+        template<typename T, typename Ret, typename... Args>
+        struct FunctionTraitInfo<Ret(T::*)(Args...) volatile> : FunctionTraitInfo<Ret(*)(Args...)> {
+        };
+
+        template<typename T, typename Ret, typename... Args>
+        struct FunctionTraitInfo<Ret(T::*)(Args...) const volatile> : FunctionTraitInfo<Ret(*)(Args...)> {
+        };
+
+        template<typename T, typename Ret, typename... Args>
+        struct FunctionTraitInfo<Ret(T::*)(Args...) &> : FunctionTraitInfo<Ret(*)(Args...)> {
+        };
+
+        template<typename T, typename Ret, typename... Args>
+        struct FunctionTraitInfo<Ret(T::*)(Args...) const &> : FunctionTraitInfo<Ret(*)(Args...)> {
+        };
+
+        template<typename T, typename Ret, typename... Args>
+        struct FunctionTraitInfo<Ret(T::*)(Args...) volatile &> : FunctionTraitInfo<Ret(*)(Args...)> {
+        };
+
+        template<typename T, typename Ret, typename... Args>
+        struct FunctionTraitInfo<Ret(T::*)(Args...) const volatile &> : FunctionTraitInfo<Ret(*)(Args...)> {
+        };
+
+        template<typename T, typename Ret, typename... Args>
+        struct FunctionTraitInfo<Ret(T::*)(Args...) &&> : FunctionTraitInfo<Ret(*)(Args...)> {
+        };
+
+        template<typename T, typename Ret, typename... Args>
+        struct FunctionTraitInfo<Ret(T::*)(Args...) const &&> : FunctionTraitInfo<Ret(*)(Args...)> {
+        };
+
+        template<typename T, typename Ret, typename... Args>
+        struct FunctionTraitInfo<Ret(T::*)(Args...) volatile &&> : FunctionTraitInfo<Ret(*)(Args...)> {
+        };
+
+        template<typename T, typename Ret, typename... Args>
+        struct FunctionTraitInfo<Ret(T::*)(Args...) const volatile &&> : FunctionTraitInfo<Ret(*)(Args...)> {
+        };
+
+        template<typename Ret, typename... Args>
+        struct FunctionTraitInfo<Ret(*)(Args...)> {
+        private:
+            using MyReturnType = Ret;
+            using MyArgumentTypes = std::tuple<Args...>;
+            constexpr static size_t MyArgumentCount = sizeof...(Args);
+
+        public:
+            template<size_t Idx> requires (Idx < MyArgumentCount)
+            using ArgumentType = std::tuple_element_t<Idx, MyArgumentTypes>;
+
+            template<size_t Idx, typename Default>
+            using ArgumentTypeOrDefault = std::conditional_t<
+                Idx < MyArgumentCount,
+                std::tuple_element_t<Idx, MyArgumentTypes>,
+                Default>;
+
+            template<typename Default>
+            using ReturnType = MyReturnType;
+
+            template<typename Default>
+            using ReturnTypeOrDefault = MyReturnType;
+        };
+    }
+
+    template<typename Fn, typename Exception>
+    using InvokeResultOfException = std::invoke_result_t<Fn, std::conditional_t<std::is_same_v<std::exception,
+            std::remove_cvref_t<Exception>>,
+        typename TypeTraits::FunctionTraitInfo<Fn>::template ArgumentTypeOrDefault<0, std::exception &>,
+        Exception &>>;
+
     template<typename Ret>
     struct InjectBase {
-        template<typename E = std::exception, std::invocable<E &> Fn>
-        requires !std::invocable<Fn>
+        template<typename E = std::exception, typename Fn>
+            requires !std::invocable<Fn>
         auto Catch(this Awaitable<Ret> self,
                    Fn catchFunction) ->
             Awaitable<
                 std::conditional_t<
                     std::is_same_v<Ret, void>,
                     std::conditional_t<
-                        std::is_same_v<void, std::invoke_result_t<Fn, E &>>,
+                        std::is_same_v<void, InvokeResultOfException<Fn, E>>,
                         void,
-                        std::optional<std::invoke_result_t<Fn, E &>>>,
+                        std::optional<InvokeResultOfException<Fn, E>>>,
                     std::conditional_t<
-                        std::is_same_v<Ret, std::invoke_result_t<Fn, E &>>,
+                        std::is_same_v<Ret, InvokeResultOfException<Fn, E>>,
                         Ret,
                         std::conditional_t<
-                            std::is_same_v<std::invoke_result_t<Fn, E &>, void>,
+                            std::is_same_v<InvokeResultOfException<Fn, E>, void>,
                             std::optional<Ret>,
-                            std::variant<Ret, std::invoke_result_t<Fn, E &>>>>>>;
+                            std::variant<Ret, InvokeResultOfException<Fn, E>>>>>>;
 
         template<std::invocable<> Fn>
         auto Catch(this Awaitable<Ret> self, Fn catchAnyFunction) ->
@@ -302,6 +399,26 @@ namespace EasyCoro {
         auto Unwrap(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type>;
 
         auto UnwrapOrThrow(this Awaitable<Ret> self) -> Awaitable<typename Ret::value_type>;
+    };
+
+    template<typename T>
+    struct WrapAwaitable {
+        using Type = Awaitable<T>;
+
+        static auto Wrap(auto func) {
+            return [f = std::move(func)]<typename... Args>(Args &&... args) -> Awaitable<T> {
+                co_return f(std::forward<Args>(args)...);
+            };
+        }
+    };
+
+    template<typename T>
+    struct WrapAwaitable<Awaitable<T>> {
+        using Type = Awaitable<T>;
+
+        static auto Wrap(auto func) {
+            return func;
+        }
     };
 
     export template<>
@@ -394,10 +511,11 @@ namespace EasyCoro {
         std::optional<std::monostate> TryGetResult();
 
         template<typename Func>
-        inline auto Then(this Awaitable self, Func &&func) -> std::invoke_result_t<Func>;
+        auto Then(this Awaitable self, Func &&func) -> WrapAwaitable<
+            std::invoke_result_t<Func>>::Type;
 
         template<typename Duration = std::chrono::milliseconds>
-        inline auto WithTimeOut(this Awaitable self, Duration duration) -> Awaitable;
+        auto WithTimeOut(this Awaitable self, Duration duration) -> Awaitable;
 
         // Awaitable CaptureEnabled(this Awaitable self);
     };
@@ -492,7 +610,8 @@ namespace EasyCoro {
         std::optional<Ret> TryGetResult();
 
         template<typename Func>
-        auto Then(this Awaitable self, Func &&func) -> std::invoke_result_t<Func, Ret>;
+        auto Then(this Awaitable self, Func &&func) -> WrapAwaitable<
+            std::invoke_result_t<Func, Ret>>::Type;
 
         template<typename Duration = std::chrono::milliseconds>
         auto WithTimeOut(this Awaitable self, Duration duration) -> Awaitable<std::optional<Ret>>;
@@ -899,9 +1018,10 @@ namespace EasyCoro {
 
     template<typename Func>
     auto Awaitable<void>::Then(this Awaitable self,
-                               Func &&func) -> std::invoke_result_t<Func> {
+                               Func &&func) -> WrapAwaitable<
+        std::invoke_result_t<Func>>::Type {
         co_await self.Move();
-        co_return co_await func();
+        co_return co_await WrapAwaitable<std::invoke_result_t<Func>>::Wrap(func)();
     }
 
     template<typename Duration>
@@ -915,37 +1035,47 @@ namespace EasyCoro {
     }
 
     template<typename Ret>
-    template<typename E, std::invocable<E &> Fn>
-    requires !std::invocable<Fn>
+    template<typename E, typename Fn>
+        requires !std::invocable<Fn>
     auto InjectBase<Ret>::Catch(this Awaitable<Ret> self,
                                 Fn catchFunction) ->
         Awaitable<
             std::conditional_t<
                 std::is_same_v<Ret, void>,
                 std::conditional_t<
-                    std::is_same_v<void, std::invoke_result_t<Fn, E &>>,
+                    std::is_same_v<void, InvokeResultOfException<Fn, E>>,
                     void,
-                    std::optional<std::invoke_result_t<Fn, E &>>>,
+                    std::optional<InvokeResultOfException<Fn, E>>>,
                 std::conditional_t<
-                    std::is_same_v<Ret, std::invoke_result_t<Fn, E &>>,
+                    std::is_same_v<Ret, InvokeResultOfException<Fn, E>>,
                     Ret,
                     std::conditional_t<
-                        std::is_same_v<std::invoke_result_t<Fn, E &>, void>,
+                        std::is_same_v<InvokeResultOfException<Fn, E>, void>,
                         std::optional<Ret>,
-                        std::variant<Ret, std::invoke_result_t<Fn, E &>>>>>> {
+                        std::variant<Ret, InvokeResultOfException<Fn, E>>>>>> {
         using returnType = std::conditional_t<
             std::is_same_v<Ret, void>,
             std::conditional_t<
-                std::is_same_v<void, std::invoke_result_t<Fn, E &>>,
+                std::is_same_v<void, InvokeResultOfException<Fn, E>>,
                 void,
-                std::optional<std::invoke_result_t<Fn, E &>>>,
+                std::optional<InvokeResultOfException<Fn, E>>>,
             std::conditional_t<
-                std::is_same_v<Ret, std::invoke_result_t<Fn, E &>>,
+                std::is_same_v<Ret, InvokeResultOfException<Fn, E>>,
                 Ret,
                 std::conditional_t<
-                    std::is_same_v<std::invoke_result_t<Fn, E &>, void>,
+                    std::is_same_v<InvokeResultOfException<Fn, E>, void>,
                     std::optional<Ret>,
-                    std::variant<Ret, std::invoke_result_t<Fn, E &>>>>>;
+                    std::variant<Ret, InvokeResultOfException<Fn, E>>>>>;
+
+        using ActualCatchReferenceType =
+                std::conditional_t<std::is_same_v<std::exception, std::remove_cvref_t<E>>,
+                    typename TypeTraits::FunctionTraitInfo<Fn>::
+                    template ArgumentTypeOrDefault<0, std::exception &>, E &>;
+
+        static_assert(std::invocable<Fn, ActualCatchReferenceType>,
+                      "Template parameter of Catch, which may have been defaulted to std::exception&, "
+                      "cannot actually be invoked with that type.");
+
         try {
             if constexpr (std::is_same_v<Ret, void>) {
                 co_await self.Move();
@@ -953,16 +1083,16 @@ namespace EasyCoro {
             } else {
                 co_return returnType{co_await self.Move()};
             }
-        } catch (E &e) {
-            if constexpr (std::is_same_v<Ret, std::invoke_result_t<Fn, E &>>) {
-                if constexpr (std::is_same_v<void, std::invoke_result_t<Fn, E &>>) {
+        } catch (ActualCatchReferenceType e) {
+            if constexpr (std::is_same_v<Ret, InvokeResultOfException<Fn, E>>) {
+                if constexpr (std::is_same_v<void, InvokeResultOfException<Fn, E>>) {
                     catchFunction(e);
                     co_return returnType{};
                 } else {
                     co_return returnType{catchFunction(e)};
                 }
             } else {
-                if constexpr (std::is_same_v<void, std::invoke_result_t<Fn, E &>>) {
+                if constexpr (std::is_same_v<void, InvokeResultOfException<Fn, E>>) {
                     catchFunction(e);
                     co_return returnType{std::nullopt};
                 } else {
@@ -1196,12 +1326,14 @@ namespace EasyCoro {
 
     template<typename Ret>
     template<typename Func>
-    auto Awaitable<Ret>::Then(this Awaitable self, Func &&func) -> std::invoke_result_t<Func, Ret> {
-        if constexpr (std::is_same_v<std::invoke_result_t<Func, Ret>, Awaitable<void>>) {
-            co_await func(co_await self.Move());
+    auto Awaitable<Ret>::Then(this Awaitable self, Func &&func) -> WrapAwaitable<
+        std::invoke_result_t<Func, Ret>>::Type {
+        if constexpr (std::is_same_v<typename WrapAwaitable<std::invoke_result_t<Func, Ret>>::Type, Awaitable<void>>) {
+            co_await WrapAwaitable<std::invoke_result_t<Func, Ret>>::Wrap(std::move(func))(co_await self.Move());
             co_return;
         } else {
-            co_return co_await func(co_await self.Move());
+            co_return co_await WrapAwaitable<std::invoke_result_t<Func, Ret>>::Wrap(std::move(func))(
+                co_await self.Move());
         }
     }
 
@@ -1430,7 +1562,7 @@ auto operator||(EasyCoro::AllOfType<Tps...> allOfType, EasyCoro::Awaitable<Ret> 
 }
 
 export template<typename Ret, typename Func>
-auto operator>>(EasyCoro::Awaitable<Ret> awaitable, Func &&func) -> std::invoke_result_t<Func, Ret> {
+auto operator>>(EasyCoro::Awaitable<Ret> awaitable, Func &&func) {
     return awaitable.Move().Then(std::forward<Func>(func));
 }
 
@@ -1482,12 +1614,12 @@ namespace EasyCoro {
         return WithTimeOutType{duration};
     }
 
-    export template<typename E, std::invocable<E &> Fn>
+    export template<typename E, typename Fn>
     struct CatchType {
         Fn catchFunction;
     };
 
-    export template<typename E, std::invocable<E &> Fn>
+    export template<typename E, typename Fn>
     constexpr auto Catch(Fn catchFunction) {
         return CatchType<E, Fn>{std::move(catchFunction)};
     }
@@ -1540,7 +1672,7 @@ auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::WithTimeOutType wi
     return awaitable.Move().WithTimeOut(withTimeOutType.Duration);
 }
 
-export template<typename Ret, typename E, std::invocable<E &> Fn>
+export template<typename Ret, typename E, typename Fn>
 auto operator>>(EasyCoro::Awaitable<Ret> awaitable, EasyCoro::CatchType<E, Fn> catchType) {
     return awaitable.Move().template Catch<E>(std::move(catchType.catchFunction));
 }

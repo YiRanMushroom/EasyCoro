@@ -187,6 +187,14 @@ int main() {
                                                     [](auto......) {
                                                         std::cout << "Caught exception in AnyOf (catch all)\n";
                                                     })
+                                                >> [](auto&&...) -> EasyCoro::Awaitable<void> {
+                                                    // discard all
+                                                    co_return;
+                                                }
+                                                >> []() -> EasyCoro::Awaitable<void> {
+                                                    std::cout << "This should not be called due to previous catch.\n";
+                                                    co_return;
+                                                }
                                                 >> EasyCoro::Cancellable(false)));
                 future.get();
             }
